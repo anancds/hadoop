@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
 # this work for additional information regarding copyright ownership.
@@ -15,27 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script runs the hadoop core commands.
-this="${BASH_SOURCE-$0}"
-bin=$(cd -P -- "$(dirname -- "$this")" >/dev/null && pwd -P)
-script="$(basename -- "$this")"
-this="$bin/$script"
+load hadoop-functions_test_helper
 
-HADOOP_DEFAULT_LIBEXEC_DIR="$bin"/../libexec
-HADOOP_LIBEXEC_DIR=${HADOOP_LIBEXEC_DIR:-$HADOOP_DEFAULT_LIBEXEC_DIR}
-# shellcheck disable=SC2034
-HADOOP_NEW_CONFIG=true
-. "$HADOOP_LIBEXEC_DIR/hadoop-config.sh"
+@test "hadoop_populate_workers_file (specific file)" {
+  touch "${TMP}/file"
+  hadoop_populate_workers_file "${TMP}/file"
+  [ "${HADOOP_WORKERS}" = "${TMP}/file" ]
+}
 
-if [ $# = 0 ]; then
-  hadoop_exit_with_usage 1
-fi
+@test "hadoop_populate_workers_file (specific conf dir file)" {
+  HADOOP_CONF_DIR=${TMP}/1
+  mkdir -p "${HADOOP_CONF_DIR}"
+  touch "${HADOOP_CONF_DIR}/file"
+  hadoop_populate_workers_file "file"
+  echo "${HADOOP_WORKERS}"
+  [ "${HADOOP_WORKERS}" = "${HADOOP_CONF_DIR}/file" ]
+}
 
-CLASS='org.apache.hadoop.record.compiler.generated.Rcc'
-
-# Always respect HADOOP_OPTS and HADOOP_CLIENT_OPTS
-hadoop_debug "Appending HADOOP_CLIENT_OPTS onto HADOOP_OPTS"
-HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_CLIENT_OPTS}"
-
-hadoop_finalize
-hadoop_java_exec rcc "${CLASS}" "$@"
+@test "hadoop_populate_workers_file (no file)" {
+  HADOOP_CONF_DIR=${TMP}
+  run hadoop_populate_workers_file "foo"
+  [ "${status}" -eq 1 ]
+}
