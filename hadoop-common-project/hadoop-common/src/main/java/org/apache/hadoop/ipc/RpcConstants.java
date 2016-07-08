@@ -37,7 +37,9 @@ public class RpcConstants {
   
   
   public static final int INVALID_RETRY_COUNT = -1;
-  
+
+    //如下无非就是设计hadoop自己的一套通信协议，第二个字段就是通信协议的版本，
+    //目前在第九个版本。
  /**
   * The Rpc-connection header is as follows 
   * +----------------------------------+
