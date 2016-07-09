@@ -1683,19 +1683,21 @@ public class NameNode extends ReconfigurableBase implements
   /**
    */
   public static void main(String argv[]) throws Exception {
+    //commons-cli命令行解析库的应用
     if (DFSUtil.parseHelpArgument(argv, NameNode.USAGE, System.out, true)) {
       System.exit(0);
     }
 
     try {
+      //启动和停止的日志打印
       StringUtils.startupShutdownMessage(NameNode.class, argv, LOG);
       NameNode namenode = createNameNode(argv, null);
       if (namenode != null) {
-        namenode.join();
+        namenode.join();  //等待NameNode的RPC服务结束，和java多线程中的join很像。
       }
     } catch (Throwable e) {
       LOG.error("Failed to start namenode.", e);
-      terminate(1, e);
+      terminate(1, e);  //出现异常直接退出。
     }
   }
 

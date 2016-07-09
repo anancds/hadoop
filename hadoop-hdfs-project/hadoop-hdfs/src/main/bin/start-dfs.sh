@@ -20,12 +20,19 @@
 # Optinally upgrade or rollback dfs state.
 # Run this on master node.
 
+#可以参考blog：http://blog.csdn.net/aperson111/article/details/7942967
+
 function hadoop_usage
 {
   echo "Usage: start-dfs.sh [-upgrade|-rollback] [-clusterId]"
 }
 
+#也可以用bin=`dirname"$0"`
+# bin=`cd"$bin"; pwd`
+#是为了防止source后的脚本$0是父脚本的名称
+#http://kodango.com/get-function-name-in-bash
 this="${BASH_SOURCE-$0}"
+#hadoop home目录中的bin所在的路径，绕了一大圈无非就是这个目的。
 bin=$(cd -P -- "$(dirname -- "${this}")" >/dev/null && pwd -P)
 
 # let's locate libexec...
@@ -78,6 +85,7 @@ fi
 
 echo "Starting namenodes on [${NAMENODES}]"
 
+#从这里看出来hdfs的入参就是namenode，所以看hdfs的脚本，找到namenode。
 "${HADOOP_HDFS_HOME}/bin/hdfs" \
     --workers \
     --config "${HADOOP_CONF_DIR}" \
