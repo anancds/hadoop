@@ -1616,7 +1616,7 @@ public class NameNode extends ReconfigurableBase implements
       case UPGRADEONLY: {
         DefaultMetricsSystem.initialize("NameNode");
         new NameNode(conf);
-        terminate(0);
+        terminate(0); //升级后需要关闭NameNode
         return null;
       }
       default: {
