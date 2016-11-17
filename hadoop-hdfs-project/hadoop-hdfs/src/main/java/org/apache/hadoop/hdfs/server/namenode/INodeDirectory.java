@@ -66,8 +66,9 @@ public class INodeDirectory extends INodeWithAdditionalFields
   }
 
   protected static final int DEFAULT_FILES_PER_DIRECTORY = 5;
+  //原来根目录的名字就是空字符串。
   final static byte[] ROOT_NAME = DFSUtil.string2Bytes("");
-
+  //用来存放目录下的文件。
   private List<INode> children = null;
   
   /** constructor */
@@ -190,6 +191,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
     return getDirectoryWithQuotaFeature() != null;
   }
 
+  //向当前目录添加磁盘配额的特性。
   DirectoryWithQuotaFeature addDirectoryWithQuotaFeature(
       DirectoryWithQuotaFeature q) {
     Preconditions.checkState(!isWithQuota(), "Directory is already with quota");
@@ -200,7 +202,8 @@ public class INodeDirectory extends INodeWithAdditionalFields
   int searchChildren(byte[] name) {
     return children == null? -1: Collections.binarySearch(children, name);
   }
-  
+
+    //想目录添加快照的特性。
   public DirectoryWithSnapshotFeature addSnapshotFeature(
       DirectoryDiffList diffs) {
     Preconditions.checkState(!isWithSnapshot(), 
@@ -541,6 +544,8 @@ public class INodeDirectory extends INodeWithAdditionalFields
   }
 
   public boolean addChild(INode node) {
+    //如果找到，则退出，如果没有找到，则返回-1，也就是说在Children的头节点上增加
+    //新的节点。
     final int low = searchChildren(node.getLocalNameBytes());
     if (low >= 0) {
       return false;

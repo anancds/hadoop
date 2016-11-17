@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.namenode;
 /** Manage name-to-serial-number maps for users and groups. */
 class SerialNumberManager {
   /** This is the only instance of {@link SerialNumberManager}.*/
+  //单例模式
   static final SerialNumberManager INSTANCE = new SerialNumberManager();
 
   private final SerialNumberMap<String> usermap = new SerialNumberMap<String>();

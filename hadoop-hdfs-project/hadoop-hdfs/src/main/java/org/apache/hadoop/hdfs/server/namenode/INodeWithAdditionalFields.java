@@ -271,8 +271,10 @@ public abstract class INodeWithAdditionalFields extends INode
     this.accessTime = accessTime;
   }
 
+  //Feature在HDFS2.6版本中新增磁盘配额、正在构建(UnderConstruction)、快照(Snapshot)
   protected void addFeature(Feature f) {
     int size = features.length;
+    //为新增的Feature申请内存
     Feature[] arr = new Feature[size + 1];
     if (size != 0) {
       System.arraycopy(features, 0, arr, 0, size);
