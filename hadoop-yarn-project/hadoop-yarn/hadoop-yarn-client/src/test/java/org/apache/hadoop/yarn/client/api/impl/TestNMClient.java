@@ -36,6 +36,7 @@ import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.service.Service.STATE;
+import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -252,9 +253,9 @@ public class TestNMClient {
           racks, priority));
     }
 
-    int containersRequestedAny = rmClient.remoteRequestsTable.get(priority,
-        ResourceRequest.ANY, ExecutionType.GUARANTEED, capability)
-        .remoteRequest.getNumContainers();
+    int containersRequestedAny = rmClient.getTable(0)
+        .get(priority, ResourceRequest.ANY, ExecutionType.GUARANTEED,
+            capability).remoteRequest.getNumContainers();
 
     // RM should allocate container within 2 calls to allocate()
     int allocatedContainerCount = 0;
@@ -330,6 +331,12 @@ public class TestNMClient {
           ByteBuffer.wrap(dob.getData(), 0, dob.getLength());
       ContainerLaunchContext clc =
           Records.newRecord(ContainerLaunchContext.class);
+      if (Shell.WINDOWS) {
+        clc.setCommands(
+            Arrays.asList("ping", "-n", "100", "127.0.0.1", ">nul"));
+      } else {
+        clc.setCommands(Arrays.asList("sleep", "10"));
+      }
       clc.setTokens(securityTokens);
       try {
         nmClient.startContainer(container, clc);
@@ -415,7 +422,7 @@ public class TestNMClient {
     try {
       nmClient.increaseContainerResource(container);
     } catch (YarnException e) {
-      // NM container will only be in LOCALIZED state, so expect the increase
+      // NM container will only be in SCHEDULED state, so expect the increase
       // action to fail.
       if (!e.getMessage().contains(
           "can only be changed when a container is in RUNNING state")) {

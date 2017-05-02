@@ -56,10 +56,10 @@ function hadoop_subproject_init
   HADOOP_YARN_HOME="${HADOOP_YARN_HOME:-$HADOOP_HOME}"
 
   # YARN-1429 added the completely superfluous YARN_USER_CLASSPATH
-  # env var.  We're going to override HADOOP_USER_CLASSPATH to keep
+  # env var.  We're going to override HADOOP_CLASSPATH to keep
   # consistency with the rest of the duplicate/useless env vars
 
-  hadoop_deprecate_envvar YARN_USER_CLASSPATH HADOOP_USER_CLASSPATH
+  hadoop_deprecate_envvar YARN_USER_CLASSPATH HADOOP_CLASSPATH
 
   hadoop_deprecate_envvar YARN_USER_CLASSPATH_FIRST HADOOP_USER_CLASSPATH_FIRST
 }
@@ -69,6 +69,7 @@ if [[ -z "${HADOOP_LIBEXEC_DIR}" ]]; then
   HADOOP_LIBEXEC_DIR=$(cd -P -- "$(dirname -- "${_yc_this}")" >/dev/null && pwd -P)
 fi
 
+# shellcheck source=./hadoop-common-project/hadoop-common/src/main/bin/hadoop-config.sh
 if [[ -n "${HADOOP_COMMON_HOME}" ]] &&
    [[ -e "${HADOOP_COMMON_HOME}/libexec/hadoop-config.sh" ]]; then
   . "${HADOOP_COMMON_HOME}/libexec/hadoop-config.sh"

@@ -24,8 +24,11 @@ import java.nio.ByteBuffer;
 import java.security.AccessControlException;
 import java.security.Principal;
 import java.security.PrivilegedExceptionAction;
+import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -59,6 +62,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.http.JettyUtils;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.Credentials;
@@ -94,10 +98,12 @@ import org.apache.hadoop.yarn.api.protocolrecords.ReservationUpdateRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationPriorityRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
+import org.apache.hadoop.yarn.api.records.ApplicationTimeoutType;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.LocalResource;
@@ -129,9 +135,13 @@ import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.NodeLabelsUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.activities.ActivitiesManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.AppAttemptInfo;
@@ -175,6 +185,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ResourceInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.SchedulerInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.SchedulerTypeInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.StatisticsItemInfo;
+import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.*;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.server.webapp.WebServices;
@@ -182,6 +193,7 @@ import org.apache.hadoop.yarn.server.webapp.dao.ContainerInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainersInfo;
 import org.apache.hadoop.yarn.util.AdHocLogDumper;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.BadRequestException;
 import org.apache.hadoop.yarn.webapp.ForbiddenException;
 import org.apache.hadoop.yarn.webapp.NotFoundException;
@@ -228,12 +240,18 @@ public class RMWebServices extends WebServices {
   protected Boolean hasAccess(RMApp app, HttpServletRequest hsr) {
     // Check for the authorization.
     UserGroupInformation callerUGI = getCallerUserGroupInformation(hsr, true);
+    List<String> forwardedAddresses = null;
+    String forwardedFor = hsr.getHeader("X-Forwarded-For");
+    if (forwardedFor != null) {
+      forwardedAddresses = Arrays.asList(forwardedFor.split(","));
+    }
     if (callerUGI != null
         && !(this.rm.getApplicationACLsManager().checkAccess(callerUGI,
               ApplicationAccessType.VIEW_APP, app.getUser(),
               app.getApplicationId()) ||
             this.rm.getQueueACLsManager().checkAccess(callerUGI,
-                QueueACL.ADMINISTER_QUEUE, app))) {
+                QueueACL.ADMINISTER_QUEUE, app, hsr.getRemoteAddr(),
+                forwardedAddresses))) {
       return false;
     }
     return true;
@@ -245,14 +263,16 @@ public class RMWebServices extends WebServices {
   }
 
   @GET
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public ClusterInfo get() {
     return getClusterInfo();
   }
 
   @GET
   @Path("/info")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public ClusterInfo getClusterInfo() {
     init();
     return new ClusterInfo(this.rm);
@@ -260,7 +280,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/metrics")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public ClusterMetricsInfo getClusterMetricsInfo() {
     init();
     return new ClusterMetricsInfo(this.rm);
@@ -268,7 +289,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/scheduler")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public SchedulerTypeInfo getSchedulerInfo() {
     init();
     ResourceScheduler rs = rm.getResourceScheduler();
@@ -291,7 +313,8 @@ public class RMWebServices extends WebServices {
 
   @POST
   @Path("/scheduler/logs")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public String dumpSchedulerLogs(@FormParam("time") String time,
       @Context HttpServletRequest hsr) throws IOException {
     init();
@@ -328,7 +351,8 @@ public class RMWebServices extends WebServices {
    */
   @GET
   @Path("/nodes")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public NodesInfo getNodes(@QueryParam("states") String states) {
     init();
     ResourceScheduler sched = this.rm.getResourceScheduler();
@@ -364,7 +388,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/nodes/{nodeId}")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public NodeInfo getNode(@PathParam("nodeId") String nodeId) {
     init();
     if (nodeId == null || nodeId.isEmpty()) {
@@ -393,7 +418,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public AppsInfo getApps(@Context HttpServletRequest hsr,
       @QueryParam("state") String stateQuery,
       @QueryParam("states") Set<String> statesQuery,
@@ -570,8 +596,129 @@ public class RMWebServices extends WebServices {
   }
 
   @GET
+  @Path("/scheduler/activities")
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
+  public ActivitiesInfo getActivities(@Context HttpServletRequest hsr,
+      @QueryParam("nodeId") String nodeId) {
+    YarnScheduler scheduler = rm.getRMContext().getScheduler();
+
+    if (scheduler instanceof AbstractYarnScheduler) {
+      String errMessage = "";
+
+      AbstractYarnScheduler abstractYarnScheduler =
+          (AbstractYarnScheduler) scheduler;
+
+      ActivitiesManager activitiesManager =
+          abstractYarnScheduler.getActivitiesManager();
+      if (null == activitiesManager) {
+        errMessage = "Not Capacity Scheduler";
+        return new ActivitiesInfo(errMessage, nodeId);
+      }
+
+      List<FiCaSchedulerNode> nodeList =
+          abstractYarnScheduler.getNodeTracker().getAllNodes();
+
+      boolean illegalInput = false;
+
+      if (nodeList.size() == 0) {
+        illegalInput = true;
+        errMessage = "No node manager running in the cluster";
+      } else {
+        if (nodeId != null) {
+          String hostName = nodeId;
+          String portName = "";
+          if (nodeId.contains(":")) {
+            int index = nodeId.indexOf(":");
+            hostName = nodeId.substring(0, index);
+            portName = nodeId.substring(index + 1);
+          }
+
+          boolean correctNodeId = false;
+          for (FiCaSchedulerNode node : nodeList) {
+            if ((portName.equals("") && node.getRMNode().getHostName().equals(
+                hostName)) || (!portName.equals("") && node.getRMNode()
+                .getHostName().equals(hostName) && String.valueOf(
+                node.getRMNode().getCommandPort()).equals(portName))) {
+              correctNodeId = true;
+              nodeId = node.getNodeID().toString();
+              break;
+            }
+          }
+          if (!correctNodeId) {
+            illegalInput = true;
+            errMessage = "Cannot find node manager with given node id";
+          }
+        }
+      }
+
+      if (!illegalInput) {
+        activitiesManager.recordNextNodeUpdateActivities(nodeId);
+        return activitiesManager.getActivitiesInfo(nodeId);
+      }
+
+      // Return a activities info with error message
+      return new ActivitiesInfo(errMessage, nodeId);
+    }
+
+    return null;
+  }
+
+  @GET
+  @Path("/scheduler/app-activities")
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
+  public AppActivitiesInfo getAppActivities(@Context HttpServletRequest hsr,
+      @QueryParam("appId") String appId, @QueryParam("maxTime") String time) {
+    YarnScheduler scheduler = rm.getRMContext().getScheduler();
+
+    if (scheduler instanceof AbstractYarnScheduler) {
+      AbstractYarnScheduler abstractYarnScheduler =
+          (AbstractYarnScheduler) scheduler;
+
+      ActivitiesManager activitiesManager =
+          abstractYarnScheduler.getActivitiesManager();
+      if (null == activitiesManager) {
+        String errMessage = "Not Capacity Scheduler";
+        return new AppActivitiesInfo(errMessage, appId);
+      }
+
+      if(appId == null) {
+        String errMessage = "Must provide an application Id";
+        return new AppActivitiesInfo(errMessage, null);
+      }
+
+      double maxTime = 3.0;
+
+      if (time != null) {
+        if (time.contains(".")) {
+          maxTime = Double.parseDouble(time);
+        } else {
+          maxTime = Double.parseDouble(time + ".0");
+        }
+      }
+
+      ApplicationId applicationId;
+      try {
+        applicationId = ApplicationId.fromString(appId);
+        activitiesManager.turnOnAppActivitiesRecording(applicationId, maxTime);
+        AppActivitiesInfo appActivitiesInfo =
+            activitiesManager.getAppActivitiesInfo(applicationId);
+
+        return appActivitiesInfo;
+      } catch (Exception e) {
+        String errMessage = "Cannot find application with given appId";
+        return new AppActivitiesInfo(errMessage, appId);
+      }
+
+    }
+    return null;
+  }
+
+  @GET
   @Path("/appstatistics")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public ApplicationStatisticsInfo getAppStatistics(
       @Context HttpServletRequest hsr,
       @QueryParam("states") Set<String> stateQueries,
@@ -658,7 +805,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public AppInfo getApp(@Context HttpServletRequest hsr,
       @PathParam("appid") String appId) {
     init();
@@ -672,7 +820,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}/appattempts")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public AppAttemptsInfo getAppAttempts(@Context HttpServletRequest hsr,
       @PathParam("appid") String appId) {
 
@@ -695,7 +844,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}/appattempts/{appattemptid}")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Override
   public org.apache.hadoop.yarn.server.webapp.dao.AppAttemptInfo getAppAttempt(@Context HttpServletRequest req,
       @Context HttpServletResponse res, @PathParam("appid") String appId,
@@ -706,7 +856,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}/appattempts/{appattemptid}/containers")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Override
   public ContainersInfo getContainers(@Context HttpServletRequest req,
       @Context HttpServletResponse res, @PathParam("appid") String appId,
@@ -717,7 +868,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}/appattempts/{appattemptid}/containers/{containerid}")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Override
   public ContainerInfo getContainer(@Context HttpServletRequest req,
       @Context HttpServletResponse res, @PathParam("appid") String appId,
@@ -729,7 +881,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}/state")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public AppState getAppState(@Context HttpServletRequest hsr,
       @PathParam("appid") String appId) throws AuthorizationException {
     init();
@@ -742,7 +895,7 @@ public class RMWebServices extends WebServices {
     try {
       app = getRMAppForAppId(appId);
     } catch (NotFoundException e) {
-      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
+      RMAuditLogger.logFailure(userName, AuditConstants.GET_APP_STATE,
         "UNKNOWN", "RMWebService",
         "Trying to get state of an absent application " + appId);
       throw e;
@@ -760,7 +913,8 @@ public class RMWebServices extends WebServices {
 
   @PUT
   @Path("/apps/{appid}/state")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response updateAppState(AppState targetState,
       @Context HttpServletRequest hsr, @PathParam("appid") String appId)
@@ -795,7 +949,7 @@ public class RMWebServices extends WebServices {
       // allow users to kill the app
 
       if (targetState.getState().equals(YarnApplicationState.KILLED.toString())) {
-        return killApp(app, callerUGI, hsr);
+        return killApp(app, callerUGI, hsr, targetState.getDiagnostics());
       }
       throw new BadRequestException("Only '"
           + YarnApplicationState.KILLED.toString()
@@ -810,7 +964,8 @@ public class RMWebServices extends WebServices {
   
   @GET
   @Path("/get-node-to-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public NodeToLabelsInfo getNodeToLabels(@Context HttpServletRequest hsr)
       throws IOException {
     init();
@@ -830,7 +985,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/label-mappings")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public LabelsToNodesInfo getLabelsToNodes(
       @QueryParam("labels") Set<String> labels) throws IOException {
     init();
@@ -859,7 +1015,8 @@ public class RMWebServices extends WebServices {
 
   @POST
   @Path("/replace-node-to-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response replaceLabelsOnNodes(final NodeToLabelsEntryList newNodeToLabels,
       @Context HttpServletRequest hsr) throws IOException {
     Map<NodeId, Set<String>> nodeIdToLabels =
@@ -876,7 +1033,8 @@ public class RMWebServices extends WebServices {
 
   @POST
   @Path("/nodes/{nodeId}/replace-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response replaceLabelsOnNode(
       @QueryParam("labels") Set<String> newNodeLabelsName,
       @Context HttpServletRequest hsr, @PathParam("nodeId") String nodeId)
@@ -924,7 +1082,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/get-node-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public NodeLabelsInfo getClusterNodeLabels(@Context HttpServletRequest hsr) 
     throws IOException {
     init();
@@ -938,7 +1097,8 @@ public class RMWebServices extends WebServices {
   
   @POST
   @Path("/add-node-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response addToClusterNodeLabels(final NodeLabelsInfo newNodeLabels,
       @Context HttpServletRequest hsr)
       throws Exception {
@@ -969,7 +1129,8 @@ public class RMWebServices extends WebServices {
   
   @POST
   @Path("/remove-node-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response removeFromCluserNodeLabels(
       @QueryParam("labels") Set<String> oldNodeLabels,
       @Context HttpServletRequest hsr) throws Exception {
@@ -999,7 +1160,8 @@ public class RMWebServices extends WebServices {
   
   @GET
   @Path("/nodes/{nodeId}/get-labels")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public NodeLabelsInfo getLabelsOnNode(@Context HttpServletRequest hsr,
       @PathParam("nodeId") String nodeId) throws IOException {
     init();
@@ -1011,7 +1173,8 @@ public class RMWebServices extends WebServices {
   }
 
   protected Response killApp(RMApp app, UserGroupInformation callerUGI,
-      HttpServletRequest hsr) throws IOException, InterruptedException {
+      HttpServletRequest hsr, String diagnostic)
+      throws IOException, InterruptedException {
 
     if (app == null) {
       throw new IllegalArgumentException("app cannot be null");
@@ -1028,6 +1191,9 @@ public class RMWebServices extends WebServices {
                   YarnException {
                 KillApplicationRequest req =
                     KillApplicationRequest.newInstance(appid);
+                  if (diagnostic != null) {
+                    req.setDiagnostics(diagnostic);
+                  }
                 return rm.getClientRMService().forceKillApplication(req);
               }
             });
@@ -1065,7 +1231,8 @@ public class RMWebServices extends WebServices {
 
   @GET
   @Path("/apps/{appid}/priority")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public AppPriority getAppPriority(@Context HttpServletRequest hsr,
       @PathParam("appid") String appId) throws AuthorizationException {
     init();
@@ -1078,22 +1245,23 @@ public class RMWebServices extends WebServices {
     try {
       app = getRMAppForAppId(appId);
     } catch (NotFoundException e) {
-      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
+      RMAuditLogger.logFailure(userName, AuditConstants.GET_APP_PRIORITY,
           "UNKNOWN", "RMWebService",
-          "Trying to get state of an absent application " + appId);
+          "Trying to get priority of an absent application " + appId);
       throw e;
     }
 
     AppPriority ret = new AppPriority();
     ret.setPriority(
-        app.getApplicationSubmissionContext().getPriority().getPriority());
+        app.getApplicationPriority().getPriority());
 
     return ret;
   }
 
   @PUT
   @Path("/apps/{appid}/priority")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response updateApplicationPriority(AppPriority targetPriority,
       @Context HttpServletRequest hsr, @PathParam("appid") String appId)
@@ -1121,12 +1289,12 @@ public class RMWebServices extends WebServices {
     try {
       app = getRMAppForAppId(appId);
     } catch (NotFoundException e) {
-      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
+      RMAuditLogger.logFailure(userName, AuditConstants.UPDATE_APP_PRIORITY,
           "UNKNOWN", "RMWebService",
-          "Trying to move an absent application " + appId);
+          "Trying to update priority an absent application " + appId);
       throw e;
     }
-    Priority priority = app.getApplicationSubmissionContext().getPriority();
+    Priority priority = app.getApplicationPriority();
     if (priority == null
         || priority.getPriority() != targetPriority.getPriority()) {
       return modifyApplicationPriority(app, callerUGI,
@@ -1173,13 +1341,14 @@ public class RMWebServices extends WebServices {
       }
     }
     AppPriority ret = new AppPriority(
-        app.getApplicationSubmissionContext().getPriority().getPriority());
+        app.getApplicationPriority().getPriority());
     return Response.status(Status.OK).entity(ret).build();
   }
 
   @GET
   @Path("/apps/{appid}/queue")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public AppQueue getAppQueue(@Context HttpServletRequest hsr,
       @PathParam("appid") String appId) throws AuthorizationException {
     init();
@@ -1192,9 +1361,9 @@ public class RMWebServices extends WebServices {
     try {
       app = getRMAppForAppId(appId);
     } catch (NotFoundException e) {
-      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
+      RMAuditLogger.logFailure(userName, AuditConstants.GET_APP_QUEUE,
         "UNKNOWN", "RMWebService",
-        "Trying to get state of an absent application " + appId);
+        "Trying to get queue of an absent application " + appId);
       throw e;
     }
 
@@ -1206,7 +1375,8 @@ public class RMWebServices extends WebServices {
 
   @PUT
   @Path("/apps/{appid}/queue")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response updateAppQueue(AppQueue targetQueue,
       @Context HttpServletRequest hsr, @PathParam("appid") String appId)
@@ -1230,7 +1400,7 @@ public class RMWebServices extends WebServices {
     try {
       app = getRMAppForAppId(appId);
     } catch (NotFoundException e) {
-      RMAuditLogger.logFailure(userName, AuditConstants.KILL_APP_REQUEST,
+      RMAuditLogger.logFailure(userName, AuditConstants.MOVE_APP_REQUEST,
         "UNKNOWN", "RMWebService", "Trying to move an absent application "
             + appId);
       throw e;
@@ -1343,7 +1513,8 @@ public class RMWebServices extends WebServices {
    */
   @POST
   @Path("/apps/new-application")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response createNewApplication(@Context HttpServletRequest hsr)
       throws AuthorizationException, IOException, InterruptedException {
     init();
@@ -1380,7 +1551,8 @@ public class RMWebServices extends WebServices {
    */
   @POST
   @Path("/apps")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response submitApplication(ApplicationSubmissionContextInfo newApp,
       @Context HttpServletRequest hsr) throws AuthorizationException,
@@ -1646,7 +1818,8 @@ public class RMWebServices extends WebServices {
 
   @POST
   @Path("/delegation-token")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response postDelegationToken(DelegationToken tokenData,
       @Context HttpServletRequest hsr) throws AuthorizationException,
@@ -1664,7 +1837,8 @@ public class RMWebServices extends WebServices {
 
   @POST
   @Path("/delegation-token/expiration")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response
       postDelegationTokenExpiration(@Context HttpServletRequest hsr)
@@ -1782,7 +1956,8 @@ public class RMWebServices extends WebServices {
   // the logs can extract tokens which are meant to be secret
   @DELETE
   @Path("/delegation-token")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response cancelDelegationToken(@Context HttpServletRequest hsr)
       throws AuthorizationException, IOException, InterruptedException,
       Exception {
@@ -1870,7 +2045,8 @@ public class RMWebServices extends WebServices {
    */
   @POST
   @Path("/reservation/new-reservation")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response createNewReservation(@Context HttpServletRequest hsr)
     throws AuthorizationException, IOException, InterruptedException {
     init();
@@ -1925,7 +2101,8 @@ public class RMWebServices extends WebServices {
    */
   @POST
   @Path("/reservation/submit")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response submitReservation(
       ReservationSubmissionRequestInfo resContext,
@@ -2034,7 +2211,8 @@ public class RMWebServices extends WebServices {
    */
   @POST
   @Path("/reservation/update")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response updateReservation(ReservationUpdateRequestInfo resContext,
       @Context HttpServletRequest hsr) throws AuthorizationException,
@@ -2148,7 +2326,8 @@ public class RMWebServices extends WebServices {
    */
   @POST
   @Path("/reservation/delete")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
   public Response deleteReservation(ReservationDeleteRequestInfo resContext,
       @Context HttpServletRequest hsr) throws AuthorizationException,
@@ -2206,7 +2385,8 @@ public class RMWebServices extends WebServices {
    */
   @GET
   @Path("/reservation/list")
-  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
   public Response listReservation(
           @QueryParam("queue") @DefaultValue("default") String queue,
           @QueryParam("reservation-id") @DefaultValue("") String reservationId,
@@ -2253,4 +2433,185 @@ public class RMWebServices extends WebServices {
     return Response.status(Status.OK).entity(resResponse).build();
   }
 
+  @GET
+  @Path("/apps/{appid}/timeouts/{type}")
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
+  public AppTimeoutInfo getAppTimeout(@Context HttpServletRequest hsr,
+      @PathParam("appid") String appId, @PathParam("type") String type)
+      throws AuthorizationException {
+    init();
+    RMApp app = validateAppTimeoutRequest(hsr, appId);
+
+    ApplicationTimeoutType appTimeoutType = parseTimeoutType(type);
+    Long timeoutValue = app.getApplicationTimeouts().get(appTimeoutType);
+    AppTimeoutInfo timeout =
+        constructAppTimeoutDao(appTimeoutType, timeoutValue);
+    return timeout;
+  }
+
+  private RMApp validateAppTimeoutRequest(HttpServletRequest hsr,
+      String appId) {
+    UserGroupInformation callerUGI = getCallerUserGroupInformation(hsr, true);
+    String userName = "UNKNOWN-USER";
+    if (callerUGI != null) {
+      userName = callerUGI.getUserName();
+    }
+
+    if (UserGroupInformation.isSecurityEnabled() && isStaticUser(callerUGI)) {
+      String msg = "The default static user cannot carry out this operation.";
+      RMAuditLogger.logFailure(userName, AuditConstants.GET_APP_TIMEOUTS,
+          "UNKNOWN", "RMWebService", msg);
+      throw new ForbiddenException(msg);
+    }
+
+    RMApp app = null;
+    try {
+      app = getRMAppForAppId(appId);
+    } catch (NotFoundException e) {
+      RMAuditLogger.logFailure(userName, AuditConstants.GET_APP_TIMEOUTS,
+          "UNKNOWN", "RMWebService",
+          "Trying to get timeouts of an absent application " + appId);
+      throw e;
+    }
+    return app;
+  }
+
+  @GET
+  @Path("/apps/{appid}/timeouts")
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
+  public AppTimeoutsInfo getAppTimeouts(@Context HttpServletRequest hsr,
+      @PathParam("appid") String appId) throws AuthorizationException {
+    init();
+
+    RMApp app = validateAppTimeoutRequest(hsr, appId);
+
+    AppTimeoutsInfo timeouts = new AppTimeoutsInfo();
+    Map<ApplicationTimeoutType, Long> applicationTimeouts =
+        app.getApplicationTimeouts();
+    if (applicationTimeouts.isEmpty()) {
+      // If application is not set timeout, lifetime should be sent as default
+      // with expiryTime=UNLIMITED and remainingTime=-1
+      timeouts
+          .add(constructAppTimeoutDao(ApplicationTimeoutType.LIFETIME, null));
+    } else {
+      for (Entry<ApplicationTimeoutType, Long> timeout : app
+          .getApplicationTimeouts().entrySet()) {
+        AppTimeoutInfo timeoutInfo =
+            constructAppTimeoutDao(timeout.getKey(), timeout.getValue());
+        timeouts.add(timeoutInfo);
+      }
+    }
+    return timeouts;
+  }
+
+  private ApplicationTimeoutType parseTimeoutType(String type) {
+    try {
+      // enum string is in the uppercase
+      return ApplicationTimeoutType
+          .valueOf(StringUtils.toUpperCase(type.trim()));
+    } catch (RuntimeException e) {
+      ApplicationTimeoutType[] typeArray = ApplicationTimeoutType.values();
+      String allAppTimeoutTypes = Arrays.toString(typeArray);
+      throw new BadRequestException("Invalid application-state " + type.trim()
+          + " specified. It should be one of " + allAppTimeoutTypes);
+    }
+  }
+
+  private AppTimeoutInfo constructAppTimeoutDao(ApplicationTimeoutType type,
+      Long timeoutInMillis) {
+    AppTimeoutInfo timeout = new AppTimeoutInfo();
+    timeout.setTimeoutType(type);
+    if (timeoutInMillis != null) {
+      timeout.setExpiryTime(Times.formatISO8601(timeoutInMillis.longValue()));
+      timeout.setRemainingTime(
+          Math.max((timeoutInMillis - System.currentTimeMillis()) / 1000, 0));
+    }
+    return timeout;
+  }
+
+  @PUT
+  @Path("/apps/{appid}/timeout")
+  @Produces({ MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_XML + "; " + JettyUtils.UTF_8 })
+  @Consumes({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  public Response updateApplicationTimeout(AppTimeoutInfo appTimeout,
+      @Context HttpServletRequest hsr, @PathParam("appid") String appId)
+      throws AuthorizationException, YarnException, InterruptedException,
+      IOException {
+    init();
+
+    UserGroupInformation callerUGI = getCallerUserGroupInformation(hsr, true);
+    if (callerUGI == null) {
+      throw new AuthorizationException(
+          "Unable to obtain user name, user not authenticated");
+    }
+
+    if (UserGroupInformation.isSecurityEnabled() && isStaticUser(callerUGI)) {
+      return Response.status(Status.FORBIDDEN)
+          .entity("The default static user cannot carry out this operation.")
+          .build();
+    }
+
+    String userName = callerUGI.getUserName();
+    RMApp app = null;
+    try {
+      app = getRMAppForAppId(appId);
+    } catch (NotFoundException e) {
+      RMAuditLogger.logFailure(userName, AuditConstants.UPDATE_APP_TIMEOUTS,
+          "UNKNOWN", "RMWebService",
+          "Trying to update timeout of an absent application " + appId);
+      throw e;
+    }
+
+    return updateApplicationTimeouts(app, callerUGI, appTimeout);
+  }
+
+  private Response updateApplicationTimeouts(final RMApp app,
+      UserGroupInformation callerUGI, final AppTimeoutInfo appTimeout)
+      throws IOException, InterruptedException {
+    if (appTimeout.getTimeoutType() == null
+        || appTimeout.getExpireTime() == null) {
+      return Response.status(Status.BAD_REQUEST)
+          .entity("Timeout type or ExpiryTime is null.").build();
+    }
+
+    String userName = callerUGI.getUserName();
+    try {
+      callerUGI.doAs(new PrivilegedExceptionAction<Void>() {
+        @Override
+        public Void run() throws IOException, YarnException {
+          UpdateApplicationTimeoutsRequest request =
+              UpdateApplicationTimeoutsRequest
+                  .newInstance(app.getApplicationId(), Collections.singletonMap(
+                      appTimeout.getTimeoutType(), appTimeout.getExpireTime()));
+          rm.getClientRMService().updateApplicationTimeouts(request);
+          return null;
+        }
+      });
+    } catch (UndeclaredThrowableException ue) {
+      // if the root cause is a permissions issue
+      // bubble that up to the user
+      if (ue.getCause() instanceof YarnException) {
+        YarnException ye = (YarnException) ue.getCause();
+        if (ye.getCause() instanceof AccessControlException) {
+          String appId = app.getApplicationId().toString();
+          String msg = "Unauthorized attempt to change timeout of app " + appId
+              + " by remote user " + userName;
+          return Response.status(Status.FORBIDDEN).entity(msg).build();
+        } else if (ye.getCause() instanceof ParseException) {
+          return Response.status(Status.BAD_REQUEST)
+              .entity(ye.getMessage()).build();
+        } else {
+          throw ue;
+        }
+      } else {
+        throw ue;
+      }
+    }
+    AppTimeoutInfo timeout = constructAppTimeoutDao(appTimeout.getTimeoutType(),
+        app.getApplicationTimeouts().get(appTimeout.getTimeoutType()));
+    return Response.status(Status.OK).entity(timeout).build();
+  }
 }

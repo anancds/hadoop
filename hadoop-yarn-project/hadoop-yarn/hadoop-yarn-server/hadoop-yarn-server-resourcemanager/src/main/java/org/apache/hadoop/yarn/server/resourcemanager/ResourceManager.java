@@ -18,7 +18,6 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager;
 
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.curator.framework.AuthInfo;
@@ -29,10 +28,12 @@ import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.http.lib.StaticUserWebFilter;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.AuthenticationFilterInitializer;
 import org.apache.hadoop.security.Groups;
 import org.apache.hadoop.security.HttpCrossOriginFilterInitializer;
@@ -48,6 +49,7 @@ import org.apache.hadoop.util.JvmPauseMonitor;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.VersionInfo;
 import org.apache.hadoop.util.ZKUtil;
 import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -65,7 +67,10 @@ import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.server.resourcemanager.ahs.RMApplicationHistoryWriter;
 import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.AMLauncherEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.ApplicationMasterLauncher;
+import org.apache.hadoop.yarn.server.resourcemanager.metrics.NoOpSystemMetricPublisher;
 import org.apache.hadoop.yarn.server.resourcemanager.metrics.SystemMetricsPublisher;
+import org.apache.hadoop.yarn.server.resourcemanager.metrics.TimelineServiceV1Publisher;
+import org.apache.hadoop.yarn.server.resourcemanager.metrics.TimelineServiceV2Publisher;
 import org.apache.hadoop.yarn.server.resourcemanager.monitor.SchedulingEditPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.monitor.SchedulingMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMDelegatedNodeLabelsUpdater;
@@ -84,6 +89,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessM
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.monitor.RMAppLifetimeMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEvent;
@@ -95,6 +101,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEv
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.RMWebApp;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.security.http.RMAuthenticationFilter;
@@ -103,22 +110,27 @@ import org.apache.hadoop.yarn.server.webproxy.AppReportFetcher;
 import org.apache.hadoop.yarn.server.webproxy.ProxyUriUtils;
 import org.apache.hadoop.yarn.server.webproxy.WebAppProxy;
 import org.apache.hadoop.yarn.server.webproxy.WebAppProxyServlet;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebApps;
 import org.apache.hadoop.yarn.webapp.WebApps.Builder;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 import org.apache.zookeeper.server.auth.DigestAuthenticationProvider;
+import org.eclipse.jetty.webapp.WebAppContext;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.Charset;
 import java.security.PrivilegedExceptionAction;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The ResourceManager is the main class that is a set of components.
@@ -140,6 +152,11 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
   private static final Log LOG = LogFactory.getLog(ResourceManager.class);
   private static long clusterTimeStamp = System.currentTimeMillis();
+
+  /*
+   * UI2 webapp name
+   */
+  public static final String UI2_WEBAPP_NAME = "/ui2";
 
   /**
    * "Always On" services. Services that need to run always irrespective of
@@ -189,7 +206,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
   private Configuration conf;
 
   private UserGroupInformation rmLoginUGI;
-  
+
   public ResourceManager() {
     super("ResourceManager");
   }
@@ -216,7 +233,8 @@ public class ResourceManager extends CompositeService implements Recoverable {
   protected void serviceInit(Configuration conf) throws Exception {
     this.conf = conf;
     this.rmContext = new RMContextImpl();
-    
+    rmContext.setResourceManager(this);
+
     this.configurationProvider =
         ConfigurationProviderFactory.getConfigurationProvider(conf);
     this.configurationProvider.init(this.conf);
@@ -256,16 +274,8 @@ public class ResourceManager extends CompositeService implements Recoverable {
     this.rmContext.setHAEnabled(HAUtil.isHAEnabled(this.conf));
     if (this.rmContext.isHAEnabled()) {
       HAUtil.verifyAndSetConfiguration(this.conf);
-      curatorEnabled = conf.getBoolean(YarnConfiguration.CURATOR_LEADER_ELECTOR,
-          YarnConfiguration.DEFAULT_CURATOR_LEADER_ELECTOR_ENABLED);
-      if (curatorEnabled) {
-        this.curator = createAndStartCurator(conf);
-        LeaderElectorService elector = new LeaderElectorService(rmContext, this);
-        addService(elector);
-        rmContext.setLeaderElectorService(elector);
-      }
     }
-    
+
     // Set UGI and do login
     // If security is enabled, use login user
     // If security is not enabled, use current user
@@ -281,9 +291,26 @@ public class ResourceManager extends CompositeService implements Recoverable {
     addIfService(rmDispatcher);
     rmContext.setDispatcher(rmDispatcher);
 
+    // The order of services below should not be changed as services will be
+    // started in same order
+    // As elector service needs admin service to be initialized and started,
+    // first we add admin service then elector service
+
     adminService = createAdminService();
     addService(adminService);
     rmContext.setRMAdminService(adminService);
+
+    // elector must be added post adminservice
+    if (this.rmContext.isHAEnabled()) {
+      // If the RM is configured to use an embedded leader elector,
+      // initialize the leader elector.
+      if (HAUtil.isAutomaticFailoverEnabled(conf)
+          && HAUtil.isAutomaticFailoverEmbedded(conf)) {
+        EmbeddedElector elector = createEmbeddedElector();
+        addIfService(elector);
+        rmContext.setLeaderElectorService(elector);
+      }
+    }
 
     rmContext.setYarnConfiguration(conf);
     
@@ -298,15 +325,39 @@ public class ResourceManager extends CompositeService implements Recoverable {
     addService(rmApplicationHistoryWriter);
     rmContext.setRMApplicationHistoryWriter(rmApplicationHistoryWriter);
 
-    SystemMetricsPublisher systemMetricsPublisher = createSystemMetricsPublisher();
-    addService(systemMetricsPublisher);
+    // initialize the RM timeline collector first so that the system metrics
+    // publisher can bind to it
+    if (YarnConfiguration.timelineServiceV2Enabled(this.conf)) {
+      RMTimelineCollectorManager timelineCollectorManager =
+          createRMTimelineCollectorManager();
+      addService(timelineCollectorManager);
+      rmContext.setRMTimelineCollectorManager(timelineCollectorManager);
+    }
+
+    SystemMetricsPublisher systemMetricsPublisher =
+        createSystemMetricsPublisher();
+    addIfService(systemMetricsPublisher);
     rmContext.setSystemMetricsPublisher(systemMetricsPublisher);
 
     super.serviceInit(this.conf);
   }
 
+  protected EmbeddedElector createEmbeddedElector() throws IOException {
+    EmbeddedElector elector;
+    curatorEnabled =
+        conf.getBoolean(YarnConfiguration.CURATOR_LEADER_ELECTOR,
+            YarnConfiguration.DEFAULT_CURATOR_LEADER_ELECTOR_ENABLED);
+    if (curatorEnabled) {
+      this.curator = createAndStartCurator(conf);
+      elector = new CuratorBasedElectorService(rmContext, this);
+    } else {
+      elector = new ActiveStandbyElectorBasedElectorService(rmContext);
+    }
+    return elector;
+  }
+
   public CuratorFramework createAndStartCurator(Configuration conf)
-      throws Exception {
+      throws IOException {
     String zkHostPort = conf.get(YarnConfiguration.RM_ZK_ADDRESS);
     if (zkHostPort == null) {
       throw new YarnRuntimeException(
@@ -373,7 +424,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
   }
 
   protected Dispatcher createDispatcher() {
-    return new AsyncDispatcher();
+    return new AsyncDispatcher("RM Event dispatcher");
   }
 
   protected ResourceScheduler createScheduler() {
@@ -449,8 +500,30 @@ public class ResourceManager extends CompositeService implements Recoverable {
     return new RMApplicationHistoryWriter();
   }
 
+  private RMTimelineCollectorManager createRMTimelineCollectorManager() {
+    return new RMTimelineCollectorManager(rmContext);
+  }
+
   protected SystemMetricsPublisher createSystemMetricsPublisher() {
-    return new SystemMetricsPublisher(); 
+    SystemMetricsPublisher publisher;
+    if (YarnConfiguration.timelineServiceEnabled(conf) &&
+        YarnConfiguration.systemMetricsPublisherEnabled(conf)) {
+      if (YarnConfiguration.timelineServiceV2Enabled(conf)) {
+        // we're dealing with the v.2.x publisher
+        LOG.info("system metrics publisher with the timeline service V2 is " +
+            "configured");
+        publisher = new TimelineServiceV2Publisher(rmContext);
+      } else {
+        // we're dealing with the v.1.x publisher
+        LOG.info("system metrics publisher with the timeline service V1 is " +
+            "configured");
+        publisher = new TimelineServiceV1Publisher();
+      }
+    } else {
+      LOG.info("TimelineServicePublisher is not configured");
+      publisher = new NoOpSystemMetricPublisher();
+    }
+    return publisher;
   }
 
   // sanity check for configurations
@@ -493,6 +566,7 @@ public class ResourceManager extends CompositeService implements Recoverable {
     private ResourceManager rm;
     private RMActiveServiceContext activeServiceContext;
     private boolean fromActive = false;
+    private StandByTransitionRunnable standByTransitionRunnable;
 
     RMActiveServices(ResourceManager rm) {
       super("RMActiveServices");
@@ -501,10 +575,11 @@ public class ResourceManager extends CompositeService implements Recoverable {
 
     @Override
     protected void serviceInit(Configuration configuration) throws Exception {
+      standByTransitionRunnable = new StandByTransitionRunnable();
+
       activeServiceContext = new RMActiveServiceContext();
       rmContext.setActiveServiceContext(activeServiceContext);
 
-      conf.setBoolean(Dispatcher.DISPATCHER_EXIT_ON_ERROR_KEY, true);
       rmSecretManagerService = createRMSecretManagerService();
       addService(rmSecretManagerService);
 
@@ -520,6 +595,10 @@ public class ResourceManager extends CompositeService implements Recoverable {
       addService(amFinishingMonitor);
       rmContext.setAMFinishingMonitor(amFinishingMonitor);
       
+      RMAppLifetimeMonitor rmAppLifetimeMonitor = createRMAppLifetimeMonitor();
+      addService(rmAppLifetimeMonitor);
+      rmContext.setRMAppLifetimeMonitor(rmAppLifetimeMonitor);
+
       RMNodeLabelsManager nlm = createNodeLabelManager();
       nlm.setRMContext(rmContext);
       addService(nlm);
@@ -744,21 +823,51 @@ public class ResourceManager extends CompositeService implements Recoverable {
     }
   }
 
-  public void handleTransitionToStandBy() {
-    if (rmContext.isHAEnabled()) {
-      try {
-        // Transition to standby and reinit active services
-        LOG.info("Transitioning RM to Standby mode");
-        transitionToStandby(true);
-        if (curatorEnabled) {
-          rmContext.getLeaderElectorService().reJoinElection();
-        } else {
-          adminService.resetLeaderElection();
-        }
+  /**
+   * Transition to standby state in a new thread. The transition operation is
+   * asynchronous to avoid deadlock caused by cyclic dependency.
+   */
+  public void handleTransitionToStandByInNewThread() {
+    Thread standByTransitionThread =
+        new Thread(activeServices.standByTransitionRunnable);
+    standByTransitionThread.setName("StandByTransitionThread");
+    standByTransitionThread.start();
+  }
+
+  /**
+   * The class to transition RM to standby state. The same
+   * {@link StandByTransitionRunnable} object could be used in multiple threads,
+   * but runs only once. That's because RM can go back to active state after
+   * transition to standby state, the same runnable in the old context can't
+   * transition RM to standby state again. A new runnable is created every time
+   * RM transitions to active state.
+   */
+  private class StandByTransitionRunnable implements Runnable {
+    // The atomic variable to make sure multiple threads with the same runnable
+    // run only once.
+    private final AtomicBoolean hasAlreadyRun = new AtomicBoolean(false);
+
+    @Override
+    public void run() {
+      // Run this only once, even if multiple threads end up triggering
+      // this simultaneously.
+      if (hasAlreadyRun.getAndSet(true)) {
         return;
-      } catch (Exception e) {
-        LOG.fatal("Failed to transition RM to Standby mode.");
-        ExitUtil.terminate(1, e);
+      }
+
+      if (rmContext.isHAEnabled()) {
+        try {
+          // Transition to standby and reinit active services
+          LOG.info("Transitioning RM to Standby mode");
+          transitionToStandby(true);
+          EmbeddedElector elector = rmContext.getLeaderElectorService();
+          if (elector != null) {
+            elector.rejoinElection();
+          }
+        } catch (Exception e) {
+          LOG.fatal("Failed to transition RM to Standby mode.", e);
+          ExitUtil.terminate(1, e);
+        }
       }
     }
   }
@@ -868,7 +977,35 @@ public class ResourceManager extends CompositeService implements Recoverable {
       }
     }
   }
-  
+
+  /**
+   * Return a HttpServer.Builder that the journalnode / namenode / secondary
+   * namenode can use to initialize their HTTP / HTTPS server.
+   *
+   * @param conf configuration object
+   * @param httpAddr HTTP address
+   * @param httpsAddr HTTPS address
+   * @param name  Name of the server
+   * @throws IOException from Builder
+   * @return builder object
+   */
+  public static HttpServer2.Builder httpServerTemplateForRM(Configuration conf,
+      final InetSocketAddress httpAddr, final InetSocketAddress httpsAddr,
+      String name) throws IOException {
+    HttpServer2.Builder builder = new HttpServer2.Builder().setName(name)
+        .setConf(conf).setSecurityEnabled(false);
+
+    if (httpAddr.getPort() == 0) {
+      builder.setFindPort(true);
+    }
+
+    URI uri = URI.create("http://" + NetUtils.getHostPortString(httpAddr));
+    builder.addEndpoint(uri);
+    LOG.info("Starting Web-server for " + name + " at: " + uri);
+
+    return builder;
+  }
+
   protected void startWepApp() {
 
     // Use the customized yarn filter instead of the standard kerberos filter to
@@ -983,9 +1120,36 @@ public class ResourceManager extends CompositeService implements Recoverable {
       builder.withAttribute(WebAppProxy.FETCHER_ATTRIBUTE, fetcher);
       String[] proxyParts = proxyHostAndPort.split(":");
       builder.withAttribute(WebAppProxy.PROXY_HOST_ATTRIBUTE, proxyParts[0]);
-
     }
-    webApp = builder.start(new RMWebApp(this));
+
+    WebAppContext uiWebAppContext = null;
+    if (getConfig().getBoolean(YarnConfiguration.YARN_WEBAPP_UI2_ENABLE,
+        YarnConfiguration.DEFAULT_YARN_WEBAPP_UI2_ENABLE)) {
+      String webPath = UI2_WEBAPP_NAME;
+      String onDiskPath = getConfig()
+          .get(YarnConfiguration.YARN_WEBAPP_UI2_WARFILE_PATH);
+
+      if (null == onDiskPath) {
+        String war = "hadoop-yarn-ui-" + VersionInfo.getVersion() + ".war";
+        URLClassLoader cl = (URLClassLoader) ClassLoader.getSystemClassLoader();
+        URL url = cl.findResource(war);
+
+        if (null == url) {
+          onDiskPath = "";
+        } else {
+          onDiskPath = url.getFile();
+        }
+
+        LOG.info(
+            "New web UI war file name:" + war + ", and path:" + onDiskPath);
+      }
+
+      uiWebAppContext = new WebAppContext();
+      uiWebAppContext.setContextPath(webPath);
+      uiWebAppContext.setWar(onDiskPath);
+    }
+
+    webApp = builder.start(new RMWebApp(this), uiWebAppContext);
   }
 
   /**
@@ -1140,24 +1304,33 @@ public class ResourceManager extends CompositeService implements Recoverable {
   }
 
   protected ApplicationMasterService createApplicationMasterService() {
-    if (this.rmContext.getYarnConfiguration().getBoolean(
-        YarnConfiguration.DIST_SCHEDULING_ENABLED,
-        YarnConfiguration.DIST_SCHEDULING_ENABLED_DEFAULT)) {
-      DistributedSchedulingService distributedSchedulingService = new
-          DistributedSchedulingService(this.rmContext, scheduler);
-      EventDispatcher distSchedulerEventDispatcher =
-          new EventDispatcher(distributedSchedulingService,
-              DistributedSchedulingService.class.getName());
-      // Add an event dispoatcher for the DistributedSchedulingService
-      // to handle node updates/additions and removals.
-      // Since the SchedulerEvent is currently a super set of theses,
-      // we register interest for it..
-      addService(distSchedulerEventDispatcher);
+    Configuration config = this.rmContext.getYarnConfiguration();
+    if (YarnConfiguration.isOpportunisticContainerAllocationEnabled(config)
+        || YarnConfiguration.isDistSchedulingEnabled(config)) {
+      if (YarnConfiguration.isDistSchedulingEnabled(config) &&
+          !YarnConfiguration
+              .isOpportunisticContainerAllocationEnabled(config)) {
+        throw new YarnRuntimeException(
+            "Invalid parameters: opportunistic container allocation has to " +
+                "be enabled when distributed scheduling is enabled.");
+      }
+      OpportunisticContainerAllocatorAMService
+          oppContainerAllocatingAMService =
+          new OpportunisticContainerAllocatorAMService(this.rmContext,
+              scheduler);
+      EventDispatcher oppContainerAllocEventDispatcher =
+          new EventDispatcher(oppContainerAllocatingAMService,
+              OpportunisticContainerAllocatorAMService.class.getName());
+      // Add an event dispatcher for the
+      // OpportunisticContainerAllocatorAMService to handle node
+      // additions, updates and removals. Since the SchedulerEvent is currently
+      // a super set of theses, we register interest for it.
+      addService(oppContainerAllocEventDispatcher);
       rmDispatcher.register(SchedulerEventType.class,
-          distSchedulerEventDispatcher);
+          oppContainerAllocEventDispatcher);
       this.rmContext.setContainerQueueLimitCalculator(
-          distributedSchedulingService.getNodeManagerQueueLimitCalculator());
-      return distributedSchedulingService;
+          oppContainerAllocatingAMService.getNodeManagerQueueLimitCalculator());
+      return oppContainerAllocatingAMService;
     }
     return new ApplicationMasterService(this.rmContext, scheduler);
   }
@@ -1326,8 +1499,10 @@ public class ResourceManager extends CompositeService implements Recoverable {
    * @param conf
    * @throws Exception
    */
-  private static void deleteRMStateStore(Configuration conf) throws Exception {
+  @VisibleForTesting
+  static void deleteRMStateStore(Configuration conf) throws Exception {
     RMStateStore rmStore = RMStateStoreFactory.getStore(conf);
+    rmStore.setResourceManager(new ResourceManager());
     rmStore.init(conf);
     rmStore.start();
     try {
@@ -1339,9 +1514,11 @@ public class ResourceManager extends CompositeService implements Recoverable {
     }
   }
 
-  private static void removeApplication(Configuration conf, String applicationId)
+  @VisibleForTesting
+  static void removeApplication(Configuration conf, String applicationId)
       throws Exception {
     RMStateStore rmStore = RMStateStoreFactory.getStore(conf);
+    rmStore.setResourceManager(new ResourceManager());
     rmStore.init(conf);
     rmStore.start();
     try {
@@ -1358,5 +1535,9 @@ public class ResourceManager extends CompositeService implements Recoverable {
     out.println("Usage: yarn resourcemanager [-format-state-store]");
     out.println("                            "
         + "[-remove-application-from-state-store <appId>]" + "\n");
+  }
+
+  protected RMAppLifetimeMonitor createRMAppLifetimeMonitor() {
+    return new RMAppLifetimeMonitor(this.rmContext);
   }
 }

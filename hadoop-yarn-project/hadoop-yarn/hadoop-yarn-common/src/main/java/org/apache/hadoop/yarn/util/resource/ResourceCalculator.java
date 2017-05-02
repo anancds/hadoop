@@ -28,8 +28,43 @@ import org.apache.hadoop.yarn.api.records.Resource;
 @Unstable
 public abstract class ResourceCalculator {
 
-  public abstract int 
-  compare(Resource clusterResource, Resource lhs, Resource rhs);
+  /**
+   * On a cluster with capacity {@code clusterResource}, compare {@code lhs}
+   * and {@code rhs}. Consider all resources unless {@code singleType} is set
+   * to true. When {@code singleType} is set to true, consider only one
+   * resource as per the {@link ResourceCalculator} implementation; the
+   * {@link DefaultResourceCalculator} considers memory and
+   * {@link DominantResourceCalculator} considers the dominant resource.
+   *
+   * @param clusterResource cluster capacity
+   * @param lhs First {@link Resource} to compare
+   * @param rhs Second {@link Resource} to compare
+   * @param singleType Whether to consider a single resource type or all
+   *                   resource types
+   * @return -1 if {@code lhs} is smaller, 0 if equal and 1 if it is larger
+   */
+  public abstract int compare(
+      Resource clusterResource, Resource lhs, Resource rhs, boolean singleType);
+
+  /**
+   * On a cluster with capacity {@code clusterResource}, compare {@code lhs}
+   * and {@code rhs} considering all resources.
+   *
+   * @param clusterResource cluster capacity
+   * @param lhs First {@link Resource} to compare
+   * @param rhs Second {@link Resource} to compare
+   * @return -1 if {@code lhs} is smaller, 0 if equal and 1 if it is larger
+   */
+  public int compare(Resource clusterResource, Resource lhs, Resource rhs) {
+    return compare(clusterResource, lhs, rhs, false);
+  }
+
+  public static int divideAndCeil(int a, int b) {
+    if (b == 0) {
+      return 0;
+    }
+    return (a + (b - 1)) / b;
+  }
   
   public static long divideAndCeil(long a, long b) {
     if (b == 0) {
@@ -38,11 +73,19 @@ public abstract class ResourceCalculator {
     return (a + (b - 1)) / b;
   }
 
+  public static int roundUp(int a, int b) {
+    return divideAndCeil(a, b) * b;
+  }
+
   public static long roundUp(long a, long b) {
     return divideAndCeil(a, b) * b;
   }
 
   public static long roundDown(long a, long b) {
+    return (a / b) * b;
+  }
+
+  public static int roundDown(int a, int b) {
     return (a / b) * b;
   }
 
@@ -84,22 +127,7 @@ public abstract class ResourceCalculator {
   /**
    * Normalize resource <code>r</code> given the base 
    * <code>minimumResource</code> and verify against max allowed
-   * <code>maximumResource</code>
-   * 
-   * @param r resource
-   * @param minimumResource step-factor
-   * @param maximumResource the upper bound of the resource to be allocated
-   * @return normalized resource
-   */
-  public Resource normalize(Resource r, Resource minimumResource,
-      Resource maximumResource) {
-    return normalize(r, minimumResource, maximumResource, minimumResource);
-  }
-
-  /**
-   * Normalize resource <code>r</code> given the base 
-   * <code>minimumResource</code> and verify against max allowed
-   * <code>maximumResource</code> using a step factor for hte normalization.
+   * <code>maximumResource</code> using a step factor for the normalization.
    *
    * @param r resource
    * @param minimumResource minimum value
@@ -169,7 +197,7 @@ public abstract class ResourceCalculator {
    * @param denominator denominator
    * @return resultant resource
    */
-  public abstract Resource divideAndCeil(Resource numerator, long denominator);
+  public abstract Resource divideAndCeil(Resource numerator, int denominator);
   
   /**
    * Check if a smaller resource can be contained by bigger resource.

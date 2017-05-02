@@ -30,16 +30,15 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
-import org.apache.hadoop.yarn.server.resourcemanager.ahs.RMApplicationHistoryWriter;
-import org.apache.hadoop.yarn.server.resourcemanager.metrics.SystemMetricsPublisher;
-import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMDelegatedNodeLabelsUpdater;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.placement.PlacementManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.NullRMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystem;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.monitor.RMAppLifetimeMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -49,6 +48,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRen
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
+import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.SystemClock;
 
@@ -94,6 +94,8 @@ public class RMActiveServiceContext {
   private NodesListManager nodesListManager;
   private ResourceTrackerService resourceTrackerService;
   private ApplicationMasterService applicationMasterService;
+  private RMTimelineCollectorManager timelineCollectorManager;
+
   private RMNodeLabelsManager nodeLabelManager;
   private RMDelegatedNodeLabelsUpdater rmDelegatedNodeLabelsUpdater;
   private long epoch;
@@ -103,6 +105,8 @@ public class RMActiveServiceContext {
   private boolean printLog = true;
   private boolean isSchedulerReady = false;
   private PlacementManager queuePlacementManager = null;
+
+  private RMAppLifetimeMonitor rmAppLifetimeMonitor;
 
   public RMActiveServiceContext() {
     queuePlacementManager = new PlacementManager();
@@ -370,6 +374,19 @@ public class RMActiveServiceContext {
 
   @Private
   @Unstable
+  public RMTimelineCollectorManager getRMTimelineCollectorManager() {
+    return timelineCollectorManager;
+  }
+
+  @Private
+  @Unstable
+  public void setRMTimelineCollectorManager(
+      RMTimelineCollectorManager collectorManager) {
+    this.timelineCollectorManager = collectorManager;
+  }
+
+  @Private
+  @Unstable
   public long getEpoch() {
     return this.epoch;
   }
@@ -452,5 +469,18 @@ public class RMActiveServiceContext {
   @Unstable
   public void setQueuePlacementManager(PlacementManager placementMgr) {
     this.queuePlacementManager = placementMgr;
+  }
+
+  @Private
+  @Unstable
+  public void setRMAppLifetimeMonitor(
+      RMAppLifetimeMonitor lifetimeMonitor) {
+    this.rmAppLifetimeMonitor = lifetimeMonitor;
+  }
+
+  @Private
+  @Unstable
+  public RMAppLifetimeMonitor getRMAppLifetimeMonitor() {
+    return this.rmAppLifetimeMonitor;
   }
 }

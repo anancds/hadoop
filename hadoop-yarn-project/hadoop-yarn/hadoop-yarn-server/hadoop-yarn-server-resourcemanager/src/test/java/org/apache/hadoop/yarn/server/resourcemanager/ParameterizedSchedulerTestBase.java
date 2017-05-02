@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairSchedulerConfiguration;
@@ -38,6 +39,7 @@ public abstract class ParameterizedSchedulerTestBase {
 
   private SchedulerType schedulerType;
   private YarnConfiguration conf = null;
+  private AbstractYarnScheduler scheduler = null;
 
   public enum SchedulerType {
     CAPACITY, FAIR
@@ -58,8 +60,11 @@ public abstract class ParameterizedSchedulerTestBase {
     if (schedulerClass == FairScheduler.class) {
       schedulerType = SchedulerType.FAIR;
       configureFairScheduler(conf);
+      scheduler = new FairScheduler();
     } else if (schedulerClass == CapacityScheduler.class) {
       schedulerType = SchedulerType.CAPACITY;
+      scheduler = new CapacityScheduler();
+      ((CapacityScheduler)scheduler).setConf(conf);
     }
   }
 
@@ -82,9 +87,25 @@ public abstract class ParameterizedSchedulerTestBase {
 
     conf.set(YarnConfiguration.RM_SCHEDULER, FairScheduler.class.getName());
     conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, FS_ALLOC_FILE);
+    conf.setLong(FairSchedulerConfiguration.UPDATE_INTERVAL_MS, 10);
   }
 
   public SchedulerType getSchedulerType() {
     return schedulerType;
+  }
+
+  /**
+   * Return a scheduler configured by {@code YarnConfiguration.RM_SCHEDULER}
+   *
+   * <p>The scheduler is configured by {@link #configureScheduler()}.
+   * Client test code can obtain the scheduler with this getter method.
+   * Schedulers supported by this class are {@link FairScheduler} or
+   * {@link CapacityScheduler}. </p>
+   *
+   * @return   The scheduler configured by
+   *           {@code YarnConfiguration.RM_SCHEDULER}
+   */
+  public AbstractYarnScheduler getScheduler() {
+    return scheduler;
   }
 }

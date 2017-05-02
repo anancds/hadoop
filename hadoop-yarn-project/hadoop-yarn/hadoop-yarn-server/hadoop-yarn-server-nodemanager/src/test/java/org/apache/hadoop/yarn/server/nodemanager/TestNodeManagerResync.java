@@ -454,6 +454,14 @@ public class TestNodeManagerResync {
             if (containersShouldBePreserved) {
               Assert.assertFalse(containers.isEmpty());
               Assert.assertTrue(containers.containsKey(existingCid));
+              ContainerState state = containers.get(existingCid)
+                  .cloneAndGetContainerStatus().getState();
+              // Wait till RUNNING state...
+              int counter = 50;
+              while (state != ContainerState.RUNNING && counter > 0) {
+                Thread.sleep(100);
+                counter--;
+              }
               Assert.assertEquals(ContainerState.RUNNING,
                   containers.get(existingCid)
                   .cloneAndGetContainerStatus().getState());
@@ -630,7 +638,7 @@ public class TestNodeManagerResync {
     }
 
     @Override
-    protected void shutDown() {
+    protected void shutDown(int exitCode) {
       synchronized (isNMShutdownCalled) {
         isNMShutdownCalled.set(true);
         isNMShutdownCalled.notify();
@@ -875,7 +883,7 @@ public class TestNodeManagerResync {
         ApplicationAttemptId.newInstance(applicationId, 1);
     ContainerId containerId = ContainerId.newContainerId(applicationAttemptId, id);
     NMContainerStatus containerReport =
-        NMContainerStatus.newInstance(containerId, containerState,
+        NMContainerStatus.newInstance(containerId, 0, containerState,
           Resource.newInstance(1024, 1), "recover container", 0,
           Priority.newInstance(10), 0);
     return containerReport;

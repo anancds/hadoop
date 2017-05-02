@@ -55,7 +55,6 @@ import org.apache.zookeeper.data.ACL;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 @InterfaceAudience.LimitedPrivate("HDFS")
@@ -84,8 +83,11 @@ public abstract class ZKFailoverController {
     ZK_AUTH_KEY
   };
   
-  protected static final String USAGE = 
-      "Usage: hdfs zkfc [ -formatZK [-force] [-nonInteractive] ]";
+  protected static final String USAGE =
+      "Usage: hdfs zkfc [ -formatZK [-force] [-nonInteractive] ]\n"
+      + "\t-force: formats the znode if the znode exists.\n"
+      + "\t-nonInteractive: formats the znode aborts if the znode exists,\n"
+      + "\tunless -force option is specified.";
 
   /** Unable to format the parent znode in ZK */
   static final int ERR_CODE_FORMAT_DENIED = 2;
@@ -508,7 +510,7 @@ public abstract class ZKFailoverController {
       doFence(target);
     } catch (Throwable t) {
       recordActiveAttempt(new ActiveAttemptRecord(false, "Unable to fence old active: " + StringUtils.stringifyException(t)));
-      Throwables.propagate(t);
+      throw t;
     }
   }
   

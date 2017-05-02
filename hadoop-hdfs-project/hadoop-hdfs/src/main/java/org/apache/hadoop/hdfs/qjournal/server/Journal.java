@@ -252,8 +252,8 @@ public class Journal implements Closeable {
     checkFormatted();
     return lastWriterEpoch.get();
   }
-  
-  synchronized long getCommittedTxnIdForTests() throws IOException {
+
+  synchronized long getCommittedTxnId() throws IOException {
     return committedTxnId.get();
   }
 
@@ -357,9 +357,15 @@ public class Journal implements Closeable {
     checkFormatted();
     checkWriteRequest(reqInfo);
 
+    // If numTxns is 0, it's actually a fake send which aims at updating
+    // committedTxId only. So we can return early.
+    if (numTxns == 0) {
+      return;
+    }
+
     checkSync(curSegment != null,
         "Can't write, no segment open");
-    
+
     if (curSegmentTxId != segmentTxId) {
       // Sanity check: it is possible that the writer will fail IPCs
       // on both the finalize() and then the start() of the next segment.
@@ -673,12 +679,12 @@ public class Journal implements Closeable {
         }
       }
       if (log != null && log.isInProgress()) {
-        logs.add(new RemoteEditLog(log.getStartTxId(), getHighestWrittenTxId(),
-            true));
+        logs.add(new RemoteEditLog(log.getStartTxId(),
+            getHighestWrittenTxId(), true));
       }
     }
-    
-    return new RemoteEditLogManifest(logs);
+
+    return new RemoteEditLogManifest(logs, getCommittedTxnId());
   }
 
   /**
@@ -1084,6 +1090,25 @@ public class Journal implements Closeable {
     storage.getJournalManager().discardSegments(startTxId);
     // we delete all the segments after the startTxId. let's reset committedTxnId 
     committedTxnId.set(startTxId - 1);
+  }
+
+  synchronized boolean renameTmpSegment(File tmpFile, File finalFile,
+      long endTxId) throws IOException {
+    final boolean success;
+    if (endTxId <= committedTxnId.get()) {
+      success = tmpFile.renameTo(finalFile);
+      if (!success) {
+        LOG.warn("Unable to rename edits file from " + tmpFile + " to " +
+            finalFile);
+      }
+    } else {
+      success = false;
+      LOG.error("The endTxId of the temporary file is not less than the " +
+          "last committed transaction id. Aborting renaming to final file" +
+          finalFile);
+    }
+
+    return success;
   }
 
   public Long getJournalCTime() throws IOException {

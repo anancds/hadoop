@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
@@ -51,7 +52,6 @@ import org.apache.hadoop.fs.azure.StorageInterface.CloudBlobDirectoryWrapper;
 import org.apache.hadoop.fs.azure.StorageInterface.CloudBlobWrapper;
 import org.apache.hadoop.fs.azure.StorageInterface.CloudBlockBlobWrapper;
 import org.apache.hadoop.fs.azure.StorageInterface.CloudPageBlobWrapper;
-import org.apache.hadoop.fs.azure.StorageInterfaceImpl.CloudPageBlobWrapperImpl;
 import org.apache.hadoop.fs.azure.metrics.AzureFileSystemInstrumentation;
 import org.apache.hadoop.fs.azure.metrics.BandwidthGaugeUpdater;
 import org.apache.hadoop.fs.azure.metrics.ErrorMetricUpdater;
@@ -59,7 +59,7 @@ import org.apache.hadoop.fs.azure.metrics.ResponseReceivedMetricUpdater;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.io.IOUtils;
-import org.mortbay.util.ajax.JSON;
+import org.eclipse.jetty.util.ajax.JSON;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -149,6 +149,21 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
   private static final String KEY_ENABLE_STORAGE_CLIENT_LOGGING = "fs.azure.storage.client.logging";
 
+  /**
+   * Configuration keys to identify if WASB needs to run in Secure mode. In Secure mode
+   * all interactions with Azure storage is performed using SAS uris. There are two sub modes
+   * within the Secure mode , one is remote SAS key mode where the SAS keys are generated
+   * from a remote process and local mode where SAS keys are generated within WASB.
+   */
+  @VisibleForTesting
+  public static final String KEY_USE_SECURE_MODE = "fs.azure.secure.mode";
+
+  /**
+   * By default the SAS Key mode is expected to run in Romote key mode. This flags sets it
+   * to run on the local mode.
+   */
+  public static final String KEY_USE_LOCAL_SAS_KEY_MODE = "fs.azure.local.sas.key.mode";
+
   private static final String PERMISSION_METADATA_KEY = "hdi_permission";
   private static final String OLD_PERMISSION_METADATA_KEY = "asv_permission";
   private static final String IS_FOLDER_METADATA_KEY = "hdi_isfolder";
@@ -180,6 +195,12 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
    */
   public static final String KEY_ATOMIC_RENAME_DIRECTORIES =
       "fs.azure.atomic.rename.dir";
+
+  /**
+   * Configuration key to enable flat listing of blobs. This config is useful
+   * only if listing depth is AZURE_UNBOUNDED_DEPTH.
+   */
+  public static final String KEY_ENABLE_FLAT_LISTING = "fs.azure.flatlist.enable";
 
   /**
    * The set of directories where we should apply atomic folder rename
@@ -224,6 +245,18 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
   private static final int STORAGE_CONNECTION_TIMEOUT_DEFAULT = 90;
 
+  /**
+   * Default values to control SAS Key mode.
+   * By default we set the values to false.
+   */
+  public static final boolean DEFAULT_USE_SECURE_MODE = false;
+  private static final boolean DEFAULT_USE_LOCAL_SAS_KEY_MODE = false;
+
+  /**
+   * Enable flat listing of blobs as default option. This is useful only if
+   * listing depth is AZURE_UNBOUNDED_DEPTH.
+   */
+  public static final boolean DEFAULT_ENABLE_FLAT_LISTING = false;
 
   /**
    * MEMBER VARIABLES
@@ -266,6 +299,11 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
   // Set if we're running against a storage emulator..
   private boolean isStorageEmulator = false;
 
+  // Configs controlling WASB SAS key mode.
+  private boolean useSecureMode = false;
+  private boolean useLocalSasKeyMode = false;
+
+  private String delegationToken;
   /**
    * A test hook interface that can modify the operation context we use for
    * Azure Storage operations, e.g. to inject errors.
@@ -398,16 +436,12 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
   @Override
   public void initialize(URI uri, Configuration conf, AzureFileSystemInstrumentation instrumentation)
       throws IllegalArgumentException, AzureException, IOException  {
-    
+
     if (null == instrumentation) {
       throw new IllegalArgumentException("Null instrumentation");
     }
     this.instrumentation = instrumentation;
 
-    if (null == this.storageInteractionLayer) {
-      this.storageInteractionLayer = new StorageInterfaceImpl();
-    }
-    
     // Check that URI exists.
     //
     if (null == uri) {
@@ -433,6 +467,20 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     //
     sessionUri = uri;
     sessionConfiguration = conf;
+
+    useSecureMode = conf.getBoolean(KEY_USE_SECURE_MODE,
+        DEFAULT_USE_SECURE_MODE);
+    useLocalSasKeyMode = conf.getBoolean(KEY_USE_LOCAL_SAS_KEY_MODE,
+        DEFAULT_USE_LOCAL_SAS_KEY_MODE);
+
+    if (null == this.storageInteractionLayer) {
+      if (!useSecureMode) {
+        this.storageInteractionLayer = new StorageInterfaceImpl();
+      } else {
+        this.storageInteractionLayer = new SecureStorageInterfaceImpl(
+            useLocalSasKeyMode, conf);
+      }
+    }
 
     // Start an Azure storage session.
     //
@@ -731,8 +779,9 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     try {
       if (!container.exists(getInstrumentedContext())) {
         throw new AzureException("Container " + containerName + " in account "
-            + accountName + " not found, and we can't create "
-            + " it using anoynomous credentials.");
+            + accountName + " not found, and we can't create"
+            + " it using anoynomous credentials, and no credentials found for them"
+            + " in the configuration.");
       }
     } catch (StorageException ex) {
       throw new AzureException("Unable to access container " + containerName
@@ -775,6 +824,34 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
     // Configure Azure storage session.
     configureAzureStorageSession();
+  }
+
+  /**
+   * Method to set up the Storage Interaction layer in Secure mode.
+   * @param accountName - Storage account provided in the initializer
+   * @param containerName - Container name provided in the initializer
+   * @param sessionUri - URI provided in the initializer
+   */
+  private void connectToAzureStorageInSecureMode(String accountName,
+      String containerName, URI sessionUri)
+          throws AzureException, StorageException, URISyntaxException {
+
+    // Assertion: storageInteractionLayer instance has to be a SecureStorageInterfaceImpl
+    if (!(this.storageInteractionLayer instanceof SecureStorageInterfaceImpl)) {
+      throw new AssertionError("connectToAzureStorageInSASKeyMode() should be called only"
+        + " for SecureStorageInterfaceImpl instances");
+    }
+
+    ((SecureStorageInterfaceImpl) this.storageInteractionLayer).
+      setStorageAccountName(accountName);
+
+    container = storageInteractionLayer.getContainerReference(containerName);
+    rootDirectory = container.getDirectoryReference("");
+
+    canCreateOrModifyContainer = true;
+
+    configureAzureStorageSession();
+    tolerateOobAppends = false;
   }
 
   /**
@@ -904,6 +981,15 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
       if (isStorageEmulatorAccount(accountName)) {
         // It is an emulator account, connect to it with no credentials.
         connectUsingCredentials(accountName, null, containerName);
+        return;
+      }
+
+      // If the securemode flag is set, WASB uses SecureStorageInterfaceImpl instance
+      // to communicate with Azure storage. In SecureStorageInterfaceImpl SAS keys
+      // are used to communicate with Azure storage, so connectToAzureStorageInSecureMode
+      // instantiates the default container using a SAS Key.
+      if (useSecureMode) {
+        connectToAzureStorageInSecureMode(accountName, containerName, sessionUri);
         return;
       }
 
@@ -1317,7 +1403,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
    */
   private OutputStream openOutputStream(final CloudBlobWrapper blob)
       throws StorageException {
-    if (blob instanceof CloudPageBlobWrapperImpl){
+    if (blob instanceof CloudPageBlobWrapper){
       return new PageBlobOutputStream(
           (CloudPageBlobWrapper)blob, getInstrumentedContext(), sessionConfiguration);
     } else {
@@ -1614,15 +1700,17 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
    * @param includeMetadata
    *          if set, the listed items will have their metadata populated
    *          already.
-   * 
+   * @param useFlatBlobListing
+   *          if set the list is flat, otherwise it is hierarchical.
+   *
    * @returns blobItems : iterable collection of blob items.
    * @throws URISyntaxException
    * 
    */
-  private Iterable<ListBlobItem> listRootBlobs(boolean includeMetadata)
-      throws StorageException, URISyntaxException {
+  private Iterable<ListBlobItem> listRootBlobs(boolean includeMetadata,
+      boolean useFlatBlobListing) throws StorageException, URISyntaxException {
     return rootDirectory.listBlobs(
-        null, false,
+        null, useFlatBlobListing,
         includeMetadata ?
             EnumSet.of(BlobListingDetails.METADATA) :
               EnumSet.noneOf(BlobListingDetails.class),
@@ -1642,16 +1730,18 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
    * @param includeMetadata
    *          if set, the listed items will have their metadata populated
    *          already.
+   * @param useFlatBlobListing
+   *          if set the list is flat, otherwise it is hierarchical.
    * 
    * @returns blobItems : iterable collection of blob items.
    * @throws URISyntaxException
    * 
    */
-  private Iterable<ListBlobItem> listRootBlobs(String aPrefix,
-      boolean includeMetadata) throws StorageException, URISyntaxException {
+  private Iterable<ListBlobItem> listRootBlobs(String aPrefix, boolean includeMetadata,
+      boolean useFlatBlobListing) throws StorageException, URISyntaxException {
 
     Iterable<ListBlobItem> list = rootDirectory.listBlobs(aPrefix,
-        false,
+        useFlatBlobListing,
         includeMetadata ?
             EnumSet.of(BlobListingDetails.METADATA) :
               EnumSet.noneOf(BlobListingDetails.class),
@@ -2029,10 +2119,10 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
    *          The key to search for.
    * @return The wanted directory, or null if not found.
    */
-  private static FileMetadata getDirectoryInList(
+  private static FileMetadata getFileMetadataInList(
       final Iterable<FileMetadata> list, String key) {
     for (FileMetadata current : list) {
-      if (current.isDir() && current.getKey().equals(key)) {
+      if (current.getKey().equals(key)) {
         return current;
       }
     }
@@ -2049,11 +2139,19 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
         prefix += PATH_DELIMITER;
       }
 
+      // Enable flat listing option only if depth is unbounded and config
+      // KEY_ENABLE_FLAT_LISTING is enabled.
+      boolean enableFlatListing = false;
+      if (maxListingDepth < 0 && sessionConfiguration.getBoolean(
+        KEY_ENABLE_FLAT_LISTING, DEFAULT_ENABLE_FLAT_LISTING)) {
+        enableFlatListing = true;
+      }
+
       Iterable<ListBlobItem> objects;
       if (prefix.equals("/")) {
-        objects = listRootBlobs(true);
+        objects = listRootBlobs(true, enableFlatListing);
       } else {
-        objects = listRootBlobs(prefix, true);
+        objects = listRootBlobs(prefix, true, enableFlatListing);
       }
 
       ArrayList<FileMetadata> fileMetadata = new ArrayList<FileMetadata>();
@@ -2090,7 +2188,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
           // Add the metadata to the list, but remove any existing duplicate
           // entries first that we may have added by finding nested files.
-          FileMetadata existing = getDirectoryInList(fileMetadata, blobKey);
+          FileMetadata existing = getFileMetadataInList(fileMetadata, blobKey);
           if (existing != null) {
             fileMetadata.remove(existing);
           }
@@ -2117,14 +2215,16 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
           // Add the directory metadata to the list only if it's not already
           // there.
-          if (getDirectoryInList(fileMetadata, dirKey) == null) {
+          if (getFileMetadataInList(fileMetadata, dirKey) == null) {
             fileMetadata.add(directoryMetadata);
           }
 
-          // Currently at a depth of one, decrement the listing depth for
-          // sub-directories.
-          buildUpList(directory, fileMetadata, maxListingCount,
-              maxListingDepth - 1);
+          if (!enableFlatListing) {
+            // Currently at a depth of one, decrement the listing depth for
+            // sub-directories.
+            buildUpList(directory, fileMetadata, maxListingCount,
+                maxListingDepth - 1);
+          }
         }
       }
       // Note: Original code indicated that this may be a hack.
@@ -2223,7 +2323,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
 
           // Add the directory metadata to the list only if it's not already
           // there.
-          FileMetadata existing = getDirectoryInList(aFileMetadataList, blobKey);
+          FileMetadata existing = getFileMetadataInList(aFileMetadataList, blobKey);
           if (existing != null) {
             aFileMetadataList.remove(existing);
           }
@@ -2252,7 +2352,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
             // absolute path is being used or not.
             String dirKey = normalizeKey(directory);
 
-            if (getDirectoryInList(aFileMetadataList, dirKey) == null) {
+            if (getFileMetadataInList(aFileMetadataList, dirKey) == null) {
               // Reached the targeted listing depth. Return metadata for the
               // directory using default permissions.
               //
@@ -2350,18 +2450,24 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     }
   }
 
+  /**
+   * API implementation to delete a blob in the back end azure storage.
+   */
   @Override
-  public void delete(String key, SelfRenewingLease lease) throws IOException {
+  public boolean delete(String key, SelfRenewingLease lease) throws IOException {
     try {
       if (checkContainer(ContainerAccessType.ReadThenWrite) == ContainerState.DoesntExist) {
         // Container doesn't exist, no need to do anything
-        return;
+        return true;
       }
 
       // Get the blob reference and delete it.
       CloudBlobWrapper blob = getBlobReference(key);
       if (blob.exists(getInstrumentedContext())) {
         safeDelete(blob, lease);
+        return true;
+      } else {
+        return false;
       }
     } catch (Exception e) {
       // Re-throw as an Azure storage exception.
@@ -2369,10 +2475,13 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
     }
   }
 
+  /**
+   * API implementation to delete a blob in the back end azure storage.
+   */
   @Override
-  public void delete(String key) throws IOException {
+  public boolean delete(String key) throws IOException {
     try {
-      delete(key, null);
+      return delete(key, null);
     } catch (IOException e) {
       Throwable t = e.getCause();
       if(t != null && t instanceof StorageException) {
@@ -2381,7 +2490,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
           SelfRenewingLease lease = null;
           try {
             lease = acquireLease(key);
-            delete(key, lease);
+            return delete(key, lease);
           } catch (AzureException e3) {
             LOG.warn("Got unexpected exception trying to acquire lease on "
                 + key + "." + e3.getMessage());
@@ -2476,8 +2585,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
       try {
         dstBlob.startCopyFromBlob(srcBlob, null, getInstrumentedContext());
       } catch (StorageException se) {
-        if (se.getErrorCode().equals(
-          StorageErrorCode.SERVER_BUSY.toString())) {
+        if (se.getHttpStatusCode() == HttpURLConnection.HTTP_UNAVAILABLE) {
           int copyBlobMinBackoff = sessionConfiguration.getInt(
             KEY_COPYBLOB_MIN_BACKOFF_INTERVAL,
 			DEFAULT_COPYBLOB_MIN_BACKOFF_INTERVAL);
@@ -2506,8 +2614,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
       waitForCopyToComplete(dstBlob, getInstrumentedContext());
       safeDelete(srcBlob, lease);
     } catch (StorageException e) {
-      if (e.getErrorCode().equals(
-        StorageErrorCode.SERVER_BUSY.toString())) {
+      if (e.getHttpStatusCode() == HttpURLConnection.HTTP_UNAVAILABLE) {
         LOG.warn("Rename: CopyBlob: StorageException: ServerBusy: Retry complete, will attempt client side copy for page blob");
         InputStream ipStream = null;
         OutputStream opStream = null;
@@ -2632,7 +2739,7 @@ public class AzureNativeFileSystemStore implements NativeFileSystemStore {
       }
       // Get all blob items with the given prefix from the container and delete
       // them.
-      Iterable<ListBlobItem> objects = listRootBlobs(prefix, false);
+      Iterable<ListBlobItem> objects = listRootBlobs(prefix, false, false);
       for (ListBlobItem blobItem : objects) {
         ((CloudBlob) blobItem).delete(DeleteSnapshotsOption.NONE, null, null,
             getInstrumentedContext());

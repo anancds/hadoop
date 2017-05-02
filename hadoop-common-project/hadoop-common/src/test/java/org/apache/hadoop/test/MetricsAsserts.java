@@ -27,7 +27,6 @@ import static org.mockito.AdditionalMatchers.geq;
 import static org.mockito.Mockito.*;
 
 import org.mockito.stubbing.Answer;
-import org.mockito.internal.matchers.GreaterThan;
 import org.mockito.invocation.InvocationOnMock;
 
 import org.mockito.ArgumentCaptor;
@@ -236,6 +235,20 @@ public class MetricsAsserts {
     return captor.getValue();
   }
 
+  public static long getLongCounterWithoutCheck(String name,
+    MetricsRecordBuilder rb) {
+    ArgumentCaptor<Long> captor = ArgumentCaptor.forClass(Long.class);
+    verify(rb, atLeast(0)).addCounter(eqName(info(name, "")), captor.capture());
+    return captor.getValue();
+  }
+
+  public static String getStringMetric(String name, MetricsRecordBuilder rb) {
+    ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+    verify(rb, atLeast(0)).tag(eqName(info(name, "")), captor.capture());
+    checkCaptured(captor, name);
+    return captor.getValue();
+  }
+
    /**
    * Assert a float gauge metric as expected
    * @param name  of the metric
@@ -315,8 +328,8 @@ public class MetricsAsserts {
    */
   public static void assertCounterGt(String name, long greater,
                                      MetricsRecordBuilder rb) {
-    Assert.assertThat("Bad value for metric " + name, getLongCounter(name, rb),
-        new GreaterThan<Long>(greater));
+    Assert.assertTrue("Bad value for metric " + name,
+        getLongCounter(name, rb) > greater);
   }
 
   /**
@@ -338,8 +351,8 @@ public class MetricsAsserts {
    */
   public static void assertGaugeGt(String name, double greater,
                                    MetricsRecordBuilder rb) {
-    Assert.assertThat("Bad value for metric " + name, getDoubleGauge(name, rb),
-        new GreaterThan<Double>(greater));
+    Assert.assertTrue("Bad value for metric " + name,
+        getDoubleGauge(name, rb) > greater);
   }
 
   /**

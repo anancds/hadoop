@@ -23,13 +23,18 @@ import static org.mockito.Mockito.when;
 
 import junit.framework.TestCase;
 
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+import java.lang.management.ManagementFactory;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
-
 import org.apache.hadoop.security.UserGroupInformation;
+import org.junit.Test;
 import org.apache.hadoop.conf.Configuration;
-import org.mockito.Matchers;
 
 public class TestFairCallQueue extends TestCase {
   private FairCallQueue<Schedulable> fcq;
@@ -41,20 +46,13 @@ public class TestFairCallQueue extends TestCase {
     when(ugi.getUserName()).thenReturn(id);
     when(mockCall.getUserGroupInformation()).thenReturn(ugi);
     when(mockCall.getPriorityLevel()).thenReturn(priority);
+    when(mockCall.toString()).thenReturn("id=" + id + " priority=" + priority);
 
     return mockCall;
   }
 
   private Schedulable mockCall(String id) {
     return mockCall(id, 0);
-  }
-
-  // A scheduler which always schedules into priority zero
-  private RpcScheduler alwaysZeroScheduler;
-  {
-    RpcScheduler sched = mock(RpcScheduler.class);
-    when(sched.getPriorityLevel(Matchers.<Schedulable>any())).thenReturn(0); // always queue 0
-    alwaysZeroScheduler = sched;
   }
 
   @SuppressWarnings("deprecation")
@@ -82,6 +80,57 @@ public class TestFairCallQueue extends TestCase {
     assertEquals(fairCallQueue.remainingCapacity(), 1025);
     fairCallQueue = new FairCallQueue<Schedulable>(7, 1025, "ns", conf);
     assertEquals(fairCallQueue.remainingCapacity(), 1025);
+  }
+
+  @Test
+  public void testPrioritization() {
+    int numQueues = 10;
+    Configuration conf = new Configuration();
+    fcq = new FairCallQueue<Schedulable>(numQueues, numQueues, "ns", conf);
+
+    //Schedulable[] calls = new Schedulable[numCalls];
+    List<Schedulable> calls = new ArrayList<>();
+    for (int i=0; i < numQueues; i++) {
+      Schedulable call = mockCall("u", i);
+      calls.add(call);
+      fcq.add(call);
+    }
+
+    final AtomicInteger currentIndex = new AtomicInteger();
+    fcq.setMultiplexer(new RpcMultiplexer(){
+      @Override
+      public int getAndAdvanceCurrentIndex() {
+        return currentIndex.get();
+      }
+    });
+
+    // if there is no call at a given index, return the next highest
+    // priority call available.
+    //   v
+    //0123456789
+    currentIndex.set(3);
+    assertSame(calls.get(3), fcq.poll());
+    assertSame(calls.get(0), fcq.poll());
+    assertSame(calls.get(1), fcq.poll());
+    //      v
+    //--2-456789
+    currentIndex.set(6);
+    assertSame(calls.get(6), fcq.poll());
+    assertSame(calls.get(2), fcq.poll());
+    assertSame(calls.get(4), fcq.poll());
+    //        v
+    //-----5-789
+    currentIndex.set(8);
+    assertSame(calls.get(8), fcq.poll());
+    //         v
+    //-----5-7-9
+    currentIndex.set(9);
+    assertSame(calls.get(9), fcq.poll());
+    assertSame(calls.get(5), fcq.poll());
+    assertSame(calls.get(7), fcq.poll());
+    //----------
+    assertNull(fcq.poll());
+    assertNull(fcq.poll());
   }
 
   //
@@ -121,7 +170,6 @@ public class TestFairCallQueue extends TestCase {
 
   public void testOfferSucceedsWhenScheduledLowPriority() {
     // Scheduler will schedule into queue 0 x 5, then queue 1
-    RpcScheduler sched = mock(RpcScheduler.class);
     int mockedPriorities[] = {0, 0, 0, 0, 0, 1, 0};
     for (int i = 0; i < 5; i++) { assertTrue(fcq.offer(mockCall("c", mockedPriorities[i]))); }
 
@@ -391,5 +439,21 @@ public class TestFairCallQueue extends TestCase {
     // Take from q1 even though mux said q0, since q0 empty
     assertEquals(call, fcq.take());
     assertEquals(0, fcq.size());
+  }
+
+  public void testFairCallQueueMXBean() throws Exception {
+    MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+    ObjectName mxbeanName = new ObjectName(
+        "Hadoop:service=ns,name=FairCallQueue");
+
+    Schedulable call = mockCall("c");
+    fcq.put(call);
+    int[] queueSizes = (int[]) mbs.getAttribute(mxbeanName, "QueueSizes");
+    assertEquals(1, queueSizes[0]);
+    assertEquals(0, queueSizes[1]);
+    fcq.take();
+    queueSizes = (int[]) mbs.getAttribute(mxbeanName, "QueueSizes");
+    assertEquals(0, queueSizes[0]);
+    assertEquals(0, queueSizes[1]);
   }
 }

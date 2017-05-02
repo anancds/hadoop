@@ -87,6 +87,11 @@ public class S3AStorageStatistics extends StorageStatistics {
   }
 
   @Override
+  public String getScheme() {
+    return "s3a";
+  }
+
+  @Override
   public Iterator<LongStatistic> getLongStatistics() {
     return new LongIterator();
   }
@@ -100,6 +105,13 @@ public class S3AStorageStatistics extends StorageStatistics {
   @Override
   public boolean isTracked(String key) {
     return Statistic.fromSymbol(key) != null;
+  }
+
+  @Override
+  public void reset() {
+    for (AtomicLong value : opsCount.values()) {
+      value.set(0);
+    }
   }
 
 }

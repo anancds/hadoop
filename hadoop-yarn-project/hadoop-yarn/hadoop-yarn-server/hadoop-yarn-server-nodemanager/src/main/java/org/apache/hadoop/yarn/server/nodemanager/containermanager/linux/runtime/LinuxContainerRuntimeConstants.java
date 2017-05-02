@@ -55,6 +55,10 @@ public final class LinuxContainerRuntimeConstants {
       List.class, "local_dirs");
   public static final Attribute<List> LOG_DIRS = Attribute.attribute(
       List.class, "log_dirs");
+  public static final Attribute<List> FILECACHE_DIRS = Attribute.attribute(
+      List.class, "filecache_dirs");
+  public static final Attribute<List> USER_LOCAL_DIRS = Attribute.attribute(
+      List.class, "user_local_dirs");
   public static final Attribute<List> CONTAINER_LOCAL_DIRS = Attribute
       .attribute(List.class, "container_local_dirs");
   public static final Attribute<List> CONTAINER_LOG_DIRS = Attribute.attribute(
@@ -63,6 +67,8 @@ public final class LinuxContainerRuntimeConstants {
       String.class, "resources_options");
   public static final Attribute<String> TC_COMMAND_FILE = Attribute.attribute(
       String.class, "tc_command_file");
+  public static final Attribute<List> CONTAINER_RUN_CMDS = Attribute.attribute(
+      List.class, "container_run_cmds");
   public static final Attribute<String> CGROUP_RELATIVE_PATH = Attribute
       .attribute(String.class, "cgroup_relative_path");
 

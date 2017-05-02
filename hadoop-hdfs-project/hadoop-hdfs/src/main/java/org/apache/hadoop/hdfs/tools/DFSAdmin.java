@@ -34,6 +34,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Optional;
@@ -51,6 +52,7 @@ import org.apache.hadoop.fs.FsStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.shell.Command;
 import org.apache.hadoop.fs.shell.CommandFormat;
+import org.apache.hadoop.fs.shell.PathData;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.HAUtilClient;
@@ -66,6 +68,7 @@ import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeLocalInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeVolumeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
@@ -108,15 +111,21 @@ public class DFSAdmin extends FsShell {
    * An abstract class for the execution of a file system command
    */
   abstract private static class DFSAdminCommand extends Command {
-    final DistributedFileSystem dfs;
+    protected DistributedFileSystem dfs;
     /** Constructor */
-    public DFSAdminCommand(FileSystem fs) {
-      super(fs.getConf());
+    public DFSAdminCommand(Configuration conf) {
+      super(conf);
+    }
+
+    @Override
+    public void run(PathData pathData) throws IOException {
+      FileSystem fs = pathData.fs;
       if (!(fs instanceof DistributedFileSystem)) {
-        throw new IllegalArgumentException("FileSystem " + fs.getUri() + 
-            " is not an HDFS file system");
+        throw new IllegalArgumentException("FileSystem " + fs.getUri()
+            + " is not an HDFS file system");
       }
-      this.dfs = (DistributedFileSystem)fs;
+      this.dfs = (DistributedFileSystem) fs;
+      run(pathData.path);
     }
   }
   
@@ -132,8 +141,8 @@ public class DFSAdmin extends FsShell {
     "\t\tIt does not fault if the directory has no quota.";
     
     /** Constructor */
-    ClearQuotaCommand(String[] args, int pos, FileSystem fs) {
-      super(fs);
+    ClearQuotaCommand(String[] args, int pos, Configuration conf) {
+      super(conf);
       CommandFormat c = new CommandFormat(1, Integer.MAX_VALUE);
       List<String> parameters = c.parse(args, pos);
       this.args = parameters.toArray(new String[parameters.size()]);
@@ -164,7 +173,7 @@ public class DFSAdmin extends FsShell {
     private static final String NAME = "setQuota";
     private static final String USAGE =
       "-"+NAME+" <quota> <dirname>...<dirname>";
-    private static final String DESCRIPTION = 
+    private static final String DESCRIPTION =
         "-setQuota <quota> <dirname>...<dirname>: " +
         "Set the quota <quota> for each directory <dirName>.\n" +
         "\t\tThe directory quota is a long integer that puts a hard limit\n" +
@@ -178,8 +187,8 @@ public class DFSAdmin extends FsShell {
     private final long quota; // the quota to be set
 
     /** Constructor */
-    SetQuotaCommand(String[] args, int pos, FileSystem fs) {
-      super(fs);
+    SetQuotaCommand(String[] args, int pos, Configuration conf) {
+      super(conf);
       CommandFormat c = new CommandFormat(2, Integer.MAX_VALUE);
       List<String> parameters = c.parse(args, pos);
       this.quota = Long.parseLong(parameters.remove(0));
@@ -211,18 +220,26 @@ public class DFSAdmin extends FsShell {
     private static final String NAME = "clrSpaceQuota";
     private static final String USAGE = "-"+NAME+" [-storageType <storagetype>] <dirname>...<dirname>";
     private static final String DESCRIPTION = USAGE + ": " +
-    "Clear the space quota for each directory <dirName>.\n" +
-    "\t\tFor each directory, attempt to clear the quota. An error will be reported if\n" +
-    "\t\t1. the directory does not exist or is a file, or\n" +
-    "\t\t2. user is not an administrator.\n" +
-    "\t\tIt does not fault if the directory has no quota.\n" +
-    "\t\tThe storage type specific quota is cleared when -storageType option is specified.";
+        "Clear the space quota for each directory <dirName>.\n" +
+        "\t\tFor each directory, attempt to clear the quota. " +
+        "An error will be reported if\n" +
+        "\t\t1. the directory does not exist or is a file, or\n" +
+        "\t\t2. user is not an administrator.\n" +
+        "\t\tIt does not fault if the directory has no quota.\n" +
+        "\t\tThe storage type specific quota is cleared when -storageType " +
+        "option is specified.\n" +
+        "\t\tAvailable storageTypes are \n" +
+        "\t\t- RAM_DISK\n" +
+        "\t\t- DISK\n" +
+        "\t\t- SSD\n" +
+        "\t\t- ARCHIVE";
+
 
     private StorageType type;
 
     /** Constructor */
-    ClearSpaceQuotaCommand(String[] args, int pos, FileSystem fs) {
-      super(fs);
+    ClearSpaceQuotaCommand(String[] args, int pos, Configuration conf) {
+      super(conf);
       CommandFormat c = new CommandFormat(1, Integer.MAX_VALUE);
       c.addOptionWithValue("storageType");
       List<String> parameters = c.parse(args, pos);
@@ -274,14 +291,19 @@ public class DFSAdmin extends FsShell {
         "\t\t1. quota is not a positive integer or zero, or\n" +
         "\t\t2. user is not an administrator, or\n" +
         "\t\t3. the directory does not exist or is a file.\n" +
-        "\t\tThe storage type specific quota is set when -storageType option is specified.\n";
+        "\t\tThe storage type specific quota is set when -storageType option is specified.\n" +
+        "\t\tAvailable storageTypes are \n" +
+        "\t\t- RAM_DISK\n" +
+        "\t\t- DISK\n" +
+        "\t\t- SSD\n" +
+        "\t\t- ARCHIVE";
 
     private long quota; // the quota to be set
     private StorageType type;
     
     /** Constructor */
-    SetSpaceQuotaCommand(String[] args, int pos, FileSystem fs) {
-      super(fs);
+    SetSpaceQuotaCommand(String[] args, int pos, Configuration conf) {
+      super(conf);
       CommandFormat c = new CommandFormat(2, Integer.MAX_VALUE);
       List<String> parameters = c.parse(args, pos);
       String str = parameters.remove(0).trim();
@@ -419,7 +441,8 @@ public class DFSAdmin extends FsShell {
     "\t[-reconfig <namenode|datanode> <host:ipc_port> " +
       "<start|status|properties>]\n" +
     "\t[-printTopology]\n" +
-    "\t[-refreshNamenodes datanode_host:ipc_port]\n"+
+      "\t[-refreshNamenodes datanode_host:ipc_port]\n" +
+      "\t[-getVolumeReport datanode_host:ipc_port]\n" +
     "\t[-deleteBlockPool datanode_host:ipc_port blockpoolId [force]]\n"+
     "\t[-setBalancerBandwidth <bandwidth in bytes per second>]\n" +
     "\t[-getBalancerBandwidth <datanode_host:ipc_port>]\n" +
@@ -569,7 +592,7 @@ public class DFSAdmin extends FsShell {
 
   /**
    * Safe mode maintenance command.
-   * Usage: hdfs dfsadmin -safemode [enter | leave | get]
+   * Usage: hdfs dfsadmin -safemode [enter | leave | get | wait | forceExit]
    * @param argv List of of command line parameters.
    * @param idx The index of the command that is being processed.
    * @exception IOException if the filesystem does not exist.
@@ -691,10 +714,11 @@ public class DFSAdmin extends FsShell {
    * @param argv List of of command line parameters.
    * @exception IOException
    */
-  public void allowSnapshot(String[] argv) throws IOException {   
-    DistributedFileSystem dfs = getDFS();
+  public void allowSnapshot(String[] argv) throws IOException {
+    Path p = new Path(argv[1]);
+    final DistributedFileSystem dfs = AdminHelper.getDFS(p.toUri(), getConf());
     try {
-      dfs.allowSnapshot(new Path(argv[1]));
+      dfs.allowSnapshot(p);
     } catch (SnapshotException e) {
       throw new RemoteException(e.getClass().getName(), e.getMessage());
     }
@@ -702,15 +726,16 @@ public class DFSAdmin extends FsShell {
   }
   
   /**
-   * Allow snapshot on a directory.
+   * Disallow snapshot on a directory.
    * Usage: hdfs dfsadmin -disallowSnapshot snapshotDir
    * @param argv List of of command line parameters.
    * @exception IOException
    */
-  public void disallowSnapshot(String[] argv) throws IOException {  
-    DistributedFileSystem dfs = getDFS();
+  public void disallowSnapshot(String[] argv) throws IOException {
+    Path p = new Path(argv[1]);
+    final DistributedFileSystem dfs = AdminHelper.getDFS(p.toUri(), getConf());
     try {
-      dfs.disallowSnapshot(new Path(argv[1]));
+      dfs.disallowSnapshot(p);
     } catch (SnapshotException e) {
       throw new RemoteException(e.getClass().getName(), e.getMessage());
     }
@@ -729,9 +754,10 @@ public class DFSAdmin extends FsShell {
     long timeWindow = 0;
     long txGap = 0;
     if (argv.length > 1 && "-beforeShutdown".equals(argv[1])) {
-      final long checkpointPeriod = dfsConf.getLong(
+      final long checkpointPeriod = dfsConf.getTimeDuration(
           DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY,
-          DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT);
+          DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT,
+          TimeUnit.SECONDS);
       final long checkpointTxnCount = dfsConf.getLong(
           DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_KEY,
           DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT);
@@ -921,8 +947,7 @@ public class DFSAdmin extends FsShell {
       System.out.println("Balancer bandwidth is " + bandwidth
           + " bytes per second.");
     } catch (IOException ioe) {
-      System.err.println("Datanode unreachable.");
-      return -1;
+      throw new IOException("Datanode unreachable. " + ioe, ioe);
     }
     return 0;
   }
@@ -1050,6 +1075,9 @@ public class DFSAdmin extends FsShell {
                               "\t\tstops serving the removed block-pools\n"+
                               "\t\tand starts serving new block-pools\n";
     
+    String getVolumeReport = "-getVolumeReport: Takes a datanodehost:port as "
+        + "argument,\n\t\tFor the given datanode, get the volume report\n";
+
     String deleteBlockPool = "-deleteBlockPool: Arguments are datanodehost:port, blockpool id\n"+
                              "\t\t and an optional argument \"force\". If force is passed,\n"+
                              "\t\t block pool directory for the given blockpool id on the given\n"+
@@ -1064,7 +1092,7 @@ public class DFSAdmin extends FsShell {
       "\tHDFS block balancing.\n\n" +
       "\t\t<bandwidth> is the maximum number of bytes per second\n" +
       "\t\tthat will be used by each datanode. This value overrides\n" +
-      "\t\tthe dfs.balance.bandwidthPerSec parameter.\n\n" +
+      "\t\tthe dfs.datanode.balance.bandwidthPerSec parameter.\n\n" +
       "\t\t--- NOTE: The new value is not persistent on the DataNode.---\n";
 
     String getBalancerBandwidth = "-getBalancerBandwidth <datanode_host:ipc_port>:\n" +
@@ -1150,6 +1178,8 @@ public class DFSAdmin extends FsShell {
       System.out.println(printTopology);
     } else if ("refreshNamenodes".equals(cmd)) {
       System.out.println(refreshNamenodes);
+    } else if ("getVolumeReport".equals(cmd)) {
+      System.out.println(getVolumeReport);
     } else if ("deleteBlockPool".equals(cmd)) {
       System.out.println(deleteBlockPool);
     } else if ("setBalancerBandwidth".equals(cmd)) {
@@ -1805,7 +1835,8 @@ public class DFSAdmin extends FsShell {
                          + " [-refreshCallQueue]");
     } else if ("-reconfig".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
-          + " [-reconfig <namenode|datanode> <host:port> <start|status>]");
+          + " [-reconfig <namenode|datanode> <host:port> "
+          + "<start|status|properties>]");
     } else if ("-refresh".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
                          + " [-refresh <hostname:port> <resource_identifier> [arg1..argn]");
@@ -1815,6 +1846,9 @@ public class DFSAdmin extends FsShell {
     } else if ("-refreshNamenodes".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
                          + " [-refreshNamenodes datanode-host:port]");
+    } else if ("-getVolumeReport".equals(cmd)) {
+      System.err.println("Usage: hdfs dfsadmin"
+          + " [-getVolumeReport datanode-host:port]");
     } else if ("-deleteBlockPool".equals(cmd)) {
       System.err.println("Usage: hdfs dfsadmin"
           + " [-deleteBlockPool datanode-host:port blockpoolId [force]]");
@@ -1947,6 +1981,11 @@ public class DFSAdmin extends FsShell {
         printUsage(cmd);
         return exitCode;
       }
+    } else if ("-getVolumeReport".equals(cmd)) {
+      if (argv.length != 2) {
+        printUsage(cmd);
+        return exitCode;
+      }
     } else if ("-reconfig".equals(cmd)) {
       if (argv.length != 4) {
         printUsage(cmd);
@@ -2027,13 +2066,13 @@ public class DFSAdmin extends FsShell {
       } else if ("-metasave".equals(cmd)) {
         exitCode = metaSave(argv, i);
       } else if (ClearQuotaCommand.matches(cmd)) {
-        exitCode = new ClearQuotaCommand(argv, i, getDFS()).runAll();
+        exitCode = new ClearQuotaCommand(argv, i, getConf()).runAll();
       } else if (SetQuotaCommand.matches(cmd)) {
-        exitCode = new SetQuotaCommand(argv, i, getDFS()).runAll();
+        exitCode = new SetQuotaCommand(argv, i, getConf()).runAll();
       } else if (ClearSpaceQuotaCommand.matches(cmd)) {
-        exitCode = new ClearSpaceQuotaCommand(argv, i, getDFS()).runAll();
+        exitCode = new ClearSpaceQuotaCommand(argv, i, getConf()).runAll();
       } else if (SetSpaceQuotaCommand.matches(cmd)) {
-        exitCode = new SetSpaceQuotaCommand(argv, i, getDFS()).runAll();
+        exitCode = new SetSpaceQuotaCommand(argv, i, getConf()).runAll();
       } else if ("-refreshServiceAcl".equals(cmd)) {
         exitCode = refreshServiceAcl();
       } else if ("-refreshUserToGroupsMappings".equals(cmd)) {
@@ -2048,6 +2087,8 @@ public class DFSAdmin extends FsShell {
         exitCode = printTopology();
       } else if ("-refreshNamenodes".equals(cmd)) {
         exitCode = refreshNamenodes(argv, i);
+      } else if ("-getVolumeReport".equals(cmd)) {
+        exitCode = getVolumeReport(argv, i);
       } else if ("-deleteBlockPool".equals(cmd)) {
         exitCode = deleteBlockPool(argv, i);
       } else if ("-setBalancerBandwidth".equals(cmd)) {
@@ -2108,6 +2149,17 @@ public class DFSAdmin extends FsShell {
       LOG.debug("Exception encountered:", debugException);
     }
     return exitCode;
+  }
+
+  private int getVolumeReport(String[] argv, int i) throws IOException {
+    ClientDatanodeProtocol datanode = getDataNodeProxy(argv[i]);
+    List<DatanodeVolumeInfo> volumeReport = datanode
+        .getVolumeReport();
+    System.out.println("Active Volumes : " + volumeReport.size());
+    for (DatanodeVolumeInfo info : volumeReport) {
+      System.out.println("\n" + info.getDatanodeVolumeReport());
+    }
+    return 0;
   }
 
   private ClientDatanodeProtocol getDataNodeProxy(String datanode)
@@ -2191,7 +2243,7 @@ public class DFSAdmin extends FsShell {
       dnProxy.evictWriters();
       System.out.println("Requested writer eviction to datanode " + dn);
     } catch (IOException ioe) {
-      return -1;
+      throw new IOException("Datanode unreachable. " + ioe, ioe);
     }
     return 0;
   }
@@ -2202,8 +2254,7 @@ public class DFSAdmin extends FsShell {
       DatanodeLocalInfo dnInfo = dnProxy.getDatanodeInfo();
       System.out.println(dnInfo.getDatanodeLocalReport());
     } catch (IOException ioe) {
-      System.err.println("Datanode unreachable.");
-      return -1;
+      throw new IOException("Datanode unreachable. " + ioe, ioe);
     }
     return 0;
   }

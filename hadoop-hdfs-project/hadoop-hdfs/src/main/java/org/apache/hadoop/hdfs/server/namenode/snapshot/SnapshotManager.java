@@ -17,6 +17,9 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.snapshot;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SNAPSHOT_CAPTURE_OPENFILES;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SNAPSHOT_CAPTURE_OPENFILES_DEFAULT;
+
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
@@ -29,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.management.ObjectName;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
@@ -37,11 +41,13 @@ import org.apache.hadoop.hdfs.protocol.SnapshotInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormat;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.INode;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.INodesInPath;
+import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.metrics2.util.MBeans;
 
 import com.google.common.base.Preconditions;
@@ -59,20 +65,23 @@ import com.google.common.base.Preconditions;
  * if necessary.
  */
 public class SnapshotManager implements SnapshotStatsMXBean {
-  private boolean allowNestedSnapshots = false;
   private final FSDirectory fsdir;
+  private final boolean captureOpenFiles;
+  private final AtomicInteger numSnapshots = new AtomicInteger();
   private static final int SNAPSHOT_ID_BIT_WIDTH = 24;
 
-  private final AtomicInteger numSnapshots = new AtomicInteger();
-
+  private boolean allowNestedSnapshots = false;
   private int snapshotCounter = 0;
   
   /** All snapshottable directories in the namesystem. */
   private final Map<Long, INodeDirectory> snapshottables =
       new HashMap<Long, INodeDirectory>();
 
-  public SnapshotManager(final FSDirectory fsdir) {
+  public SnapshotManager(final Configuration conf, final FSDirectory fsdir) {
     this.fsdir = fsdir;
+    this.captureOpenFiles = conf.getBoolean(
+        DFS_NAMENODE_SNAPSHOT_CAPTURE_OPENFILES,
+        DFS_NAMENODE_SNAPSHOT_CAPTURE_OPENFILES_DEFAULT);
   }
 
   /** Used in tests only */
@@ -108,7 +117,7 @@ public class SnapshotManager implements SnapshotStatsMXBean {
    */
   public void setSnapshottable(final String path, boolean checkNestedSnapshottable)
       throws IOException {
-    final INodesInPath iip = fsdir.getINodesInPath4Write(path);
+    final INodesInPath iip = fsdir.getINodesInPath(path, DirOp.WRITE);
     final INodeDirectory d = INodeDirectory.valueOf(iip.getLastINode(), path);
     if (checkNestedSnapshottable) {
       checkNestedSnapshottable(d, path);
@@ -149,7 +158,7 @@ public class SnapshotManager implements SnapshotStatsMXBean {
    * @throws SnapshotException if there are snapshots in the directory.
    */
   public void resetSnapshottable(final String path) throws IOException {
-    final INodesInPath iip = fsdir.getINodesInPath4Write(path);
+    final INodesInPath iip = fsdir.getINodesInPath(path, DirOp.WRITE);
     final INodeDirectory d = INodeDirectory.valueOf(iip.getLastINode(), path);
     DirectorySnapshottableFeature sf = d.getDirectorySnapshottableFeature();
     if (sf == null) {
@@ -202,8 +211,9 @@ public class SnapshotManager implements SnapshotStatsMXBean {
    *           snapshot with the given name for the directory, and/or 3)
    *           snapshot number exceeds quota
    */
-  public String createSnapshot(final INodesInPath iip, String snapshotRoot,
-      String snapshotName) throws IOException {
+  public String createSnapshot(final LeaseManager leaseManager,
+      final INodesInPath iip, String snapshotRoot, String snapshotName)
+      throws IOException {
     INodeDirectory srcRoot = getSnapshottableRoot(iip);
 
     if (snapshotCounter == getMaxSnapshotID()) {
@@ -215,7 +225,8 @@ public class SnapshotManager implements SnapshotStatsMXBean {
           "snapshot IDs and ID rollover is not supported.");
     }
 
-    srcRoot.addSnapshot(snapshotCounter, snapshotName);
+    srcRoot.addSnapshot(snapshotCounter, snapshotName, leaseManager,
+        this.captureOpenFiles);
       
     //create success, update id
     snapshotCounter++;

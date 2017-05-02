@@ -34,6 +34,7 @@ import java.util.concurrent.ConcurrentMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
 import org.apache.hadoop.yarn.nodelabels.RMNodeLabel;
@@ -128,6 +129,17 @@ public class RMNodeLabelsManager extends CommonNodeLabelsManager {
       super.removeFromClusterNodeLabels(labelsToRemove);
 
       updateResourceMappings(before, nodeCollections);
+    } finally {
+      writeLock.unlock();
+    }
+  }
+
+  @Override
+  public void addToCluserNodeLabels(Collection<NodeLabel> labels)
+      throws IOException {
+    try {
+      writeLock.lock();
+      super.addToCluserNodeLabels(labels);
     } finally {
       writeLock.unlock();
     }
@@ -350,6 +362,22 @@ public class RMNodeLabelsManager extends CommonNodeLabelsManager {
     }
   }
   
+  /*
+   * Get active node count based on label.
+   */
+  public int getActiveNMCountPerLabel(String label) {
+    if (label == null) {
+      return 0;
+    }
+    try {
+      readLock.lock();
+      RMNodeLabel labelInfo = labelCollections.get(label);
+      return (labelInfo == null) ? 0 : labelInfo.getNumActiveNMs();
+    } finally {
+      readLock.unlock();
+    }
+  }
+
   public Set<String> getLabelsOnNode(NodeId nodeId) {
     try {
       readLock.lock();

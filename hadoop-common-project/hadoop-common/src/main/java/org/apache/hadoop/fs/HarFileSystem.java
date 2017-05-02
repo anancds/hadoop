@@ -968,6 +968,9 @@ public class HarFileSystem extends FileSystem {
       @Override
       public synchronized int read(byte[] b, int offset, int len) 
         throws IOException {
+        if (len == 0) {
+          return 0;
+        }
         int newlen = len;
         int ret = -1;
         if (position + len > end) {
@@ -1264,5 +1267,10 @@ public class HarFileSystem extends FileSystem {
   @Override
   public short getDefaultReplication(Path f) {
     return fs.getDefaultReplication(f);
+  }
+
+  @Override
+  public FSDataOutputStreamBuilder newFSDataOutputStreamBuilder(Path path) {
+    return fs.newFSDataOutputStreamBuilder(path);
   }
 }

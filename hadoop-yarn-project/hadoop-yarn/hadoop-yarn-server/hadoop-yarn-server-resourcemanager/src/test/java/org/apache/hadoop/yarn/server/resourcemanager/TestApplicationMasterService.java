@@ -29,22 +29,21 @@ import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.AllocateRequestPBImpl;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
+import org.apache.hadoop.yarn.api.records.ContainerUpdateType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
-import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.exceptions.ApplicationMasterNotRegisteredException;
 import org.apache.hadoop.yarn.exceptions.InvalidContainerReleaseException;
-import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
@@ -326,10 +325,8 @@ public class TestApplicationMasterService {
 
   @Test(timeout=1200000)
   public void  testAllocateAfterUnregister() throws Exception {
-    MyResourceManager rm = new MyResourceManager(conf);
+    MockRM rm = new MockRM(conf);
     rm.start();
-    DrainDispatcher rmDispatcher = (DrainDispatcher) rm.getRMContext()
-            .getDispatcher();
     // Register node1
     MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
 
@@ -350,7 +347,7 @@ public class TestApplicationMasterService {
     AllocateResponse alloc1Response = am1.schedule();
 
     nm1.nodeHeartbeat(true);
-    rmDispatcher.await();
+    rm.drainEvents();
     alloc1Response = am1.schedule();
     Assert.assertEquals(0, alloc1Response.getAllocatedContainers().size());
   }
@@ -383,57 +380,47 @@ public class TestApplicationMasterService {
       
       // Ask for a normal increase should be successfull
       am1.sendContainerResizingRequest(Arrays.asList(
-              ContainerResourceChangeRequest.newInstance(
-                  ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                  Resources.createResource(2048))), null);
+              UpdateContainerRequest.newInstance(
+                  0, ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+                  ContainerUpdateType.INCREASE_RESOURCE,
+                  Resources.createResource(2048), null)));
       
       // Target resource is negative, should fail
-      boolean exceptionCaught = false;
-      try {
-        am1.sendContainerResizingRequest(Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources.createResource(-1))), null);
-      } catch (InvalidResourceRequestException e) {
-        // This is expected
-        exceptionCaught = true;
-      }
-      Assert.assertTrue(exceptionCaught);
-      
+      AllocateResponse response =
+          am1.sendContainerResizingRequest(Arrays.asList(
+              UpdateContainerRequest.newInstance(0,
+                  ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+                  ContainerUpdateType.INCREASE_RESOURCE,
+                  Resources.createResource(-1), null)));
+      Assert.assertEquals(1, response.getUpdateErrors().size());
+      Assert.assertEquals("RESOURCE_OUTSIDE_ALLOWED_RANGE",
+          response.getUpdateErrors().get(0).getReason());
+
       // Target resource is more than maxAllocation, should fail
-      try {
-        am1.sendContainerResizingRequest(Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources
-                        .add(registerResponse.getMaximumResourceCapability(),
-                            Resources.createResource(1)))), null);
-      } catch (InvalidResourceRequestException e) {
-        // This is expected
-        exceptionCaught = true;
-      }
+      response = am1.sendContainerResizingRequest(Arrays.asList(
+          UpdateContainerRequest.newInstance(0,
+              ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+              ContainerUpdateType.INCREASE_RESOURCE,
+              Resources.add(
+                  registerResponse.getMaximumResourceCapability(),
+                  Resources.createResource(1)), null)));
+      Assert.assertEquals(1, response.getUpdateErrors().size());
+      Assert.assertEquals("RESOURCE_OUTSIDE_ALLOWED_RANGE",
+          response.getUpdateErrors().get(0).getReason());
 
-      Assert.assertTrue(exceptionCaught);
-      
       // Contains multiple increase/decrease requests for same contaienrId 
-      try {
-        am1.sendContainerResizingRequest(Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources
-                        .add(registerResponse.getMaximumResourceCapability(),
-                            Resources.createResource(1)))), Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources
-                        .add(registerResponse.getMaximumResourceCapability(),
-                            Resources.createResource(1)))));
-      } catch (InvalidResourceRequestException e) {
-        // This is expected
-        exceptionCaught = true;
-      }
-
-      Assert.assertTrue(exceptionCaught);
+      response = am1.sendContainerResizingRequest(Arrays.asList(
+          UpdateContainerRequest.newInstance(0,
+              ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+              ContainerUpdateType.INCREASE_RESOURCE,
+              Resources.createResource(2048, 4), null),
+          UpdateContainerRequest.newInstance(0,
+              ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+              ContainerUpdateType.DECREASE_RESOURCE,
+              Resources.createResource(1024, 1), null)));
+      Assert.assertEquals(1, response.getUpdateErrors().size());
+      Assert.assertEquals("UPDATE_OUTSTANDING_ERROR",
+          response.getUpdateErrors().get(0).getReason());
     } finally {
       if (rm != null) {
         rm.close();
@@ -471,29 +458,18 @@ public class TestApplicationMasterService {
     AllocateResponse response1 = am1.allocate(allocateRequest);
     Assert.assertEquals(appPriority1, response1.getApplicationPriority());
 
-    // get scheduler
-    CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
-
     // Change the priority of App1 to 8
     Priority appPriority2 = Priority.newInstance(8);
-    cs.updateApplicationPriority(appPriority2, app1.getApplicationId());
+    UserGroupInformation ugi = UserGroupInformation
+        .createRemoteUser(app1.getUser());
+    rm.getRMAppManager().updateApplicationPriority(ugi, app1.getApplicationId(),
+        appPriority2);
 
     AllocateResponse response2 = am1.allocate(allocateRequest);
     Assert.assertEquals(appPriority2, response2.getApplicationPriority());
     rm.stop();
   }
 
-  private static class MyResourceManager extends MockRM {
-
-    public MyResourceManager(YarnConfiguration conf) {
-      super(conf);
-    }
-    @Override
-    protected Dispatcher createDispatcher() {
-      return new DrainDispatcher();
-    }
-  }
-  
   private void sentRMContainerLaunched(MockRM rm, ContainerId containerId) {
     CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
     RMContainer rmContainer = cs.getRMContainer(containerId);

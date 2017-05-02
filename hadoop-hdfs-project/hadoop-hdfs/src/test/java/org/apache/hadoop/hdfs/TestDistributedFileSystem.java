@@ -49,6 +49,8 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
@@ -69,19 +71,24 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.StorageStatistics.LongStatistic;
 import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.fs.contract.ContractTestUtils;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
+import org.apache.hadoop.hdfs.client.impl.LeaseRenewer;
 import org.apache.hadoop.hdfs.DFSOpsCountStatistics.OpType;
 import org.apache.hadoop.hdfs.net.Peer;
+import org.apache.hadoop.hdfs.protocol.AddingECPolicyResponse;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
-import org.apache.hadoop.hdfs.server.namenode.top.window.RollingWindowManager.Op;
 import org.apache.hadoop.hdfs.web.WebHdfsConstants;
+import org.apache.hadoop.io.erasurecode.ECSchema;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.ScriptBasedMapping;
@@ -96,7 +103,6 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.InOrder;
 import org.mockito.internal.util.reflection.Whitebox;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -573,7 +579,44 @@ public class TestDistributedFileSystem {
       if (cluster != null) {cluster.shutdown();}
     }
   }
-  
+
+  /**
+   * This is to test that the {@link FileSystem#clearStatistics()} resets all
+   * the global storage statistics.
+   */
+  @Test
+  public void testClearStatistics() throws Exception {
+    final Configuration conf = getTestConfiguration();
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).build();
+    try {
+      cluster.waitActive();
+      FileSystem dfs = cluster.getFileSystem();
+
+      final Path dir = new Path("/testClearStatistics");
+      final long mkdirCount = getOpStatistics(OpType.MKDIRS);
+      long writeCount = DFSTestUtil.getStatistics(dfs).getWriteOps();
+      dfs.mkdirs(dir);
+      checkOpStatistics(OpType.MKDIRS, mkdirCount + 1);
+      assertEquals(++writeCount,
+          DFSTestUtil.getStatistics(dfs).getWriteOps());
+
+      final long createCount = getOpStatistics(OpType.CREATE);
+      FSDataOutputStream out = dfs.create(new Path(dir, "tmpFile"), (short)1);
+      out.write(40);
+      out.close();
+      checkOpStatistics(OpType.CREATE, createCount + 1);
+      assertEquals(++writeCount,
+          DFSTestUtil.getStatistics(dfs).getWriteOps());
+
+      FileSystem.clearStatistics();
+      checkOpStatistics(OpType.MKDIRS, 0);
+      checkOpStatistics(OpType.CREATE, 0);
+      checkStatistics(dfs, 0, 0, 0);
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
   @Test
   public void testStatistics() throws IOException {
     FileSystem.getStatistics(HdfsConstants.HDFS_URI_SCHEME,
@@ -993,13 +1036,6 @@ public class TestDistributedFileSystem {
         out.close();
       }
 
-      // verify the magic val for zero byte files
-      {
-        final FileChecksum zeroChecksum = hdfs.getFileChecksum(zeroByteFile);
-        assertEquals(zeroChecksum.toString(),
-            "MD5-of-0MD5-of-0CRC32:70bc8f4b72a86921468bf8e8441dce51");
-      }
-
       //write another file
       final Path bar = new Path(dir, "bar" + n);
       {
@@ -1008,8 +1044,19 @@ public class TestDistributedFileSystem {
         out.write(data);
         out.close();
       }
-  
-      { //verify checksum
+
+      {
+        final FileChecksum zeroChecksum = hdfs.getFileChecksum(zeroByteFile);
+        final String magicValue =
+            "MD5-of-0MD5-of-0CRC32:70bc8f4b72a86921468bf8e8441dce51";
+        // verify the magic val for zero byte files
+        assertEquals(magicValue, zeroChecksum.toString());
+
+        //verify checksums for empty file and 0 request length
+        final FileChecksum checksumWith0 = hdfs.getFileChecksum(bar, 0);
+        assertEquals(zeroChecksum, checksumWith0);
+
+        //verify checksum
         final FileChecksum barcs = hdfs.getFileChecksum(bar);
         final int barhashcode = barcs.hashCode();
         assertEquals(hdfsfoocs.hashCode(), barhashcode);
@@ -1336,4 +1383,103 @@ public class TestDistributedFileSystem {
     }
   }
 
+  @Test
+  public void testDFSCloseFilesBeingWritten() throws Exception {
+    Configuration conf = getTestConfiguration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+      DistributedFileSystem fileSys = cluster.getFileSystem();
+
+      // Create one file then delete it to trigger the FileNotFoundException
+      // when closing the file.
+      fileSys.create(new Path("/test/dfsclose/file-0"));
+      fileSys.delete(new Path("/test/dfsclose/file-0"), true);
+
+      DFSClient dfsClient = fileSys.getClient();
+      // Construct a new dfsClient to get the same LeaseRenewer instance,
+      // to avoid the original client being added to the leaseRenewer again.
+      DFSClient newDfsClient =
+          new DFSClient(cluster.getFileSystem(0).getUri(), conf);
+      LeaseRenewer leaseRenewer = newDfsClient.getLeaseRenewer();
+
+      dfsClient.closeAllFilesBeingWritten(false);
+      // Remove new dfsClient in leaseRenewer
+      leaseRenewer.closeClient(newDfsClient);
+
+      // The list of clients corresponding to this renewer should be empty
+      assertEquals(true, leaseRenewer.isEmpty());
+      assertEquals(true, dfsClient.isFilesBeingWrittenEmpty());
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test
+  public void testDFSDataOutputStreamBuilder() throws Exception {
+    Configuration conf = getTestConfiguration();
+    MiniDFSCluster cluster = null;
+    String testFile = "/testDFSDataOutputStreamBuilder";
+    Path testFilePath = new Path(testFile);
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+      DistributedFileSystem fs = cluster.getFileSystem();
+
+      // Test create an empty file
+      FSDataOutputStream out =
+          fs.newFSDataOutputStreamBuilder(testFilePath).build();
+      out.close();
+
+      // Test create a file with content, and verify the content
+      String content = "This is a test!";
+      out = fs.newFSDataOutputStreamBuilder(testFilePath)
+          .setBufferSize(4096).setReplication((short) 1)
+          .setBlockSize(4096).build();
+      byte[] contentOrigin = content.getBytes("UTF8");
+      out.write(contentOrigin);
+      out.close();
+
+      ContractTestUtils.verifyFileContents(fs, testFilePath,
+          content.getBytes());
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test
+  public void testAddErasureCodingPolicies() throws Exception {
+    Configuration conf = getTestConfiguration();
+    MiniDFSCluster cluster = null;
+
+    try {
+      ErasureCodingPolicy policy1 =
+          SystemErasureCodingPolicies.getPolicies().get(0);
+      conf.set(DFSConfigKeys.DFS_NAMENODE_EC_POLICIES_ENABLED_KEY,
+          Stream.of(policy1).map(ErasureCodingPolicy::getName)
+          .collect(Collectors.joining(", ")));
+
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+      DistributedFileSystem fs = cluster.getFileSystem();
+
+      ECSchema toAddSchema = new ECSchema("testcodec", 3, 2);
+      ErasureCodingPolicy toAddPolicy =
+          new ErasureCodingPolicy(toAddSchema, 128 * 1024, (byte) 254);
+      ErasureCodingPolicy[] policies = new ErasureCodingPolicy[]{
+          policy1, toAddPolicy};
+      AddingECPolicyResponse[] responses =
+          fs.addErasureCodingPolicies(policies);
+      assertEquals(2, responses.length);
+      assertFalse(responses[0].isSucceed());
+      assertTrue(responses[1].isSucceed());
+      assertTrue(responses[1].getPolicy().getId() > 0);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
 }

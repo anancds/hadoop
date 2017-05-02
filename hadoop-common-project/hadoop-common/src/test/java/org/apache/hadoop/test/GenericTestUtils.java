@@ -18,16 +18,20 @@
 package org.apache.hadoop.test;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.io.StringWriter;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -42,10 +46,12 @@ import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
+import org.apache.log4j.Appender;
 import org.apache.log4j.Layout;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import org.apache.log4j.PatternLayout;
 import org.apache.log4j.WriterAppender;
 import org.junit.Assert;
 import org.junit.Assume;
@@ -270,41 +276,113 @@ public abstract class GenericTestUtils {
         "Thread diagnostics:\n" +
         TimedOutTestsListener.buildThreadDiagnosticString());
   }
-  
+
+  /**
+   * Prints output to one {@link PrintStream} while copying to the other.
+   * <p>
+   * Closing the main {@link PrintStream} will NOT close the other.
+   */
+  public static class TeePrintStream extends PrintStream {
+    private final PrintStream other;
+
+    public TeePrintStream(OutputStream main, PrintStream other) {
+      super(main);
+      this.other = other;
+    }
+
+    @Override
+    public void flush() {
+      super.flush();
+      other.flush();
+    }
+
+    @Override
+    public void write(byte[] buf, int off, int len) {
+      super.write(buf, off, len);
+      other.write(buf, off, len);
+    }
+  }
+
+  /**
+   * Capture output printed to {@link System#err}.
+   * <p>
+   * Usage:
+   * <pre>
+   *   try (SystemErrCapturer capture = new SystemErrCapturer()) {
+   *     ...
+   *     // Call capture.getOutput() to get the output string
+   *   }
+   * </pre>
+   *
+   * TODO: Add lambda support once Java 8 is common.
+   * <pre>
+   *   SystemErrCapturer.withCapture(capture -> {
+   *     ...
+   *   })
+   * </pre>
+   */
+  public static class SystemErrCapturer implements AutoCloseable {
+    final private ByteArrayOutputStream bytes;
+    final private PrintStream bytesPrintStream;
+    final private PrintStream oldErr;
+
+    public SystemErrCapturer() {
+      bytes = new ByteArrayOutputStream();
+      bytesPrintStream = new PrintStream(bytes);
+      oldErr = System.err;
+      System.setErr(new TeePrintStream(oldErr, bytesPrintStream));
+    }
+
+    public String getOutput() {
+      return bytes.toString();
+    }
+
+    @Override
+    public void close() throws Exception {
+      IOUtils.closeQuietly(bytesPrintStream);
+      System.setErr(oldErr);
+    }
+  }
+
   public static class LogCapturer {
     private StringWriter sw = new StringWriter();
     private WriterAppender appender;
     private Logger logger;
-    
+
     public static LogCapturer captureLogs(Log l) {
       Logger logger = ((Log4JLogger)l).getLogger();
-      LogCapturer c = new LogCapturer(logger);
-      return c;
+      return new LogCapturer(logger);
     }
-    
+
+    public static LogCapturer captureLogs(org.slf4j.Logger logger) {
+      return new LogCapturer(toLog4j(logger));
+    }
 
     private LogCapturer(Logger logger) {
       this.logger = logger;
-      Layout layout = Logger.getRootLogger().getAppender("stdout").getLayout();
-      WriterAppender wa = new WriterAppender(layout, sw);
-      logger.addAppender(wa);
+      Appender defaultAppender = Logger.getRootLogger().getAppender("stdout");
+      if (defaultAppender == null) {
+        defaultAppender = Logger.getRootLogger().getAppender("console");
+      }
+      final Layout layout = (defaultAppender == null) ? new PatternLayout() :
+          defaultAppender.getLayout();
+      this.appender = new WriterAppender(layout, sw);
+      logger.addAppender(this.appender);
     }
-    
+
     public String getOutput() {
       return sw.toString();
     }
-    
+
     public void stopCapturing() {
       logger.removeAppender(appender);
-
     }
 
     public void clearOutput() {
       sw.getBuffer().setLength(0);
     }
   }
-  
-  
+
   /**
    * Mockito answer helper that triggers one latch as soon as the
    * method is called, then waits on another before continuing.
@@ -613,6 +691,39 @@ public abstract class GenericTestUtils {
     String l;
     while ((l = r.readLine()) != null) {
       bld.append(" + ").append(l).append("\n");
+    }
+  }
+
+  /**
+   * Formatted fail, via {@link String#format(String, Object...)}.
+   * @param format format string
+   * @param args argument list. If the last argument is a throwable, it
+   * is used as the inner cause of the exception
+   * @throws AssertionError with the formatted message
+   */
+  public static void failf(String format, Object... args) {
+    String message = String.format(Locale.ENGLISH, format, args);
+    AssertionError error = new AssertionError(message);
+    int len = args.length;
+    if (len > 0 && args[len - 1] instanceof Throwable) {
+      error.initCause((Throwable) args[len - 1]);
+    }
+    throw error;
+  }
+
+  /**
+   * Conditional formatted fail, via {@link String#format(String, Object...)}.
+   * @param condition condition: if true the method fails
+   * @param format format string
+   * @param args argument list. If the last argument is a throwable, it
+   * is used as the inner cause of the exception
+   * @throws AssertionError with the formatted message
+   */
+  public static void failif(boolean condition,
+      String format,
+      Object... args) {
+    if (condition) {
+      failf(format, args);
     }
   }
 }

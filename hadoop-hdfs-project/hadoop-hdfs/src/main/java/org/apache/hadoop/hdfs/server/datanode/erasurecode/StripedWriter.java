@@ -280,6 +280,10 @@ class StripedWriter {
     return reconstructor.getSocketAddress4Transfer(target);
   }
 
+  StripedReconstructor getReconstructor() {
+    return reconstructor;
+  }
+
   boolean hasValidTargets() {
     return hasValidTargets;
   }
@@ -297,6 +301,14 @@ class StripedWriter {
   }
 
   void close() {
+    for (StripedBlockWriter writer : writers) {
+      ByteBuffer targetBuffer = writer.getTargetBuffer();
+      if (targetBuffer != null) {
+        reconstructor.freeBuffer(targetBuffer);
+        writer.freeTargetBuffer();
+      }
+    }
+
     for (int i = 0; i < targets.length; i++) {
       writers[i].close();
     }

@@ -20,6 +20,9 @@ package org.apache.hadoop.fs;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.io.InvalidObjectException;
+import java.io.ObjectInputValidation;
+import java.io.Serializable;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -31,11 +34,14 @@ import org.apache.hadoop.io.Writable;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
-public class FileStatus implements Writable, Comparable<FileStatus> {
+public class FileStatus implements Writable, Comparable<FileStatus>,
+    Serializable, ObjectInputValidation {
+
+  private static final long serialVersionUID = 0x13caeae8;
 
   private Path path;
   private long length;
-  private boolean isdir;
+  private Boolean isdir;
   private short block_replication;
   private long blocksize;
   private long modification_time;
@@ -202,6 +208,15 @@ public class FileStatus implements Writable, Comparable<FileStatus> {
   }
 
   /**
+   * Tell whether the underlying file or directory has ACLs set.
+   *
+   * @return true if the underlying file or directory has ACLs set.
+   */
+  public boolean hasAcl() {
+    return permission.getAclBit();
+  }
+
+  /**
    * Tell whether the underlying file or directory is encrypted or not.
    *
    * @return true if the underlying file is encrypted.
@@ -209,7 +224,16 @@ public class FileStatus implements Writable, Comparable<FileStatus> {
   public boolean isEncrypted() {
     return permission.getEncryptedBit();
   }
-  
+
+  /**
+   * Tell whether the underlying file or directory is erasure coded or not.
+   *
+   * @return true if the underlying file or directory is erasure coded.
+   */
+  public boolean isErasureCoded() {
+    return permission.getErasureCodedBit();
+  }
+
   /**
    * Get the owner of the file.
    * @return owner of the file. The string could be empty if there is no
@@ -384,7 +408,21 @@ public class FileStatus implements Writable, Comparable<FileStatus> {
     if(isSymlink()) {
       sb.append("; symlink=" + symlink);
     }
+    sb.append("; hasAcl=" + hasAcl());
+    sb.append("; isEncrypted=" + isEncrypted());
+    sb.append("; isErasureCoded=" + isErasureCoded());
     sb.append("}");
     return sb.toString();
   }
+
+  @Override
+  public void validateObject() throws InvalidObjectException {
+    if (null == path) {
+      throw new InvalidObjectException("No Path in deserialized FileStatus");
+    }
+    if (null == isdir) {
+      throw new InvalidObjectException("No type in deserialized FileStatus");
+    }
+  }
+
 }

@@ -160,6 +160,10 @@ public interface ClientProtocol {
    * @param replication block replication factor.
    * @param blockSize maximum block size.
    * @param supportedVersions CryptoProtocolVersions supported by the client
+   * @param ecPolicyName the name of erasure coding policy. A null value means
+   *                     this file will inherit its parent directory's policy,
+   *                     either traditional replication or erasure coding
+   *                     policy.
    *
    * @return the status of the created file, it could be null if the server
    *           doesn't support returning the file status
@@ -193,7 +197,7 @@ public interface ClientProtocol {
   HdfsFileStatus create(String src, FsPermission masked,
       String clientName, EnumSetWritable<CreateFlag> flag,
       boolean createParent, short replication, long blockSize,
-      CryptoProtocolVersion[] supportedVersions)
+      CryptoProtocolVersion[] supportedVersions, String ecPolicyName)
       throws IOException;
 
   /**
@@ -938,7 +942,7 @@ public interface ClientProtocol {
 
   /**
    * Tell all datanodes to use a new, non-persistent bandwidth value for
-   * dfs.balance.bandwidthPerSec.
+   * dfs.datanode.balance.bandwidthPerSec.
    *
    * @param bandwidth Blanacer bandwidth in bytes per second for this datanode.
    * @throws IOException
@@ -1510,12 +1514,22 @@ public interface ClientProtocol {
   /**
    * Set an erasure coding policy on a specified path.
    * @param src The path to set policy on.
-   * @param ecPolicy The erasure coding policy. If null, default policy will
-   *                 be used
+   * @param ecPolicyName The erasure coding policy name.
    */
   @AtMostOnce
-  void setErasureCodingPolicy(String src, ErasureCodingPolicy ecPolicy)
+  void setErasureCodingPolicy(String src, String ecPolicyName)
       throws IOException;
+
+  /**
+   * Add Erasure coding policies.
+   *
+   * @param policies The user defined ec policy list to add.
+   * @return Return the response list of adding operations.
+   * @throws IOException
+   */
+  @AtMostOnce
+  AddingECPolicyResponse[] addErasureCodingPolicies(
+      ErasureCodingPolicy[] policies) throws IOException;
 
   /**
    * Get the erasure coding policies loaded in Namenode
@@ -1533,6 +1547,13 @@ public interface ClientProtocol {
    */
   @Idempotent
   ErasureCodingPolicy getErasureCodingPolicy(String src) throws IOException;
+
+  /**
+   * Unset erasure coding policy from a specified path.
+   * @param src The path to unset policy.
+   */
+  @AtMostOnce
+  void unsetErasureCodingPolicy(String src) throws IOException;
 
   /**
    * Get {@link QuotaUsage} rooted at the specified directory.

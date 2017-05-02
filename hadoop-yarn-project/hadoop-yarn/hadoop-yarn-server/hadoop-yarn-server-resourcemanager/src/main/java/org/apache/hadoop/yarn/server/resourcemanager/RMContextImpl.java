@@ -22,8 +22,8 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.yarn.LocalConfigurationProvider;
@@ -40,6 +40,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystem;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.monitor.RMAppLifetimeMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -51,6 +52,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRen
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
+import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 import org.apache.hadoop.yarn.util.Clock;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -74,10 +76,13 @@ public class RMContextImpl implements RMContext {
 
   private RMApplicationHistoryWriter rmApplicationHistoryWriter;
   private SystemMetricsPublisher systemMetricsPublisher;
-  private LeaderElectorService elector;
+  private EmbeddedElector elector;
 
   private QueueLimitCalculator queueLimitCalculator;
 
+  private final Object haServiceStateLock = new Object();
+
+  private ResourceManager resourceManager;
   /**
    * Default constructor. To be used in conjunction with setter methods for
    * individual fields.
@@ -139,12 +144,12 @@ public class RMContextImpl implements RMContext {
   }
 
   @Override
-  public void setLeaderElectorService(LeaderElectorService elector) {
+  public void setLeaderElectorService(EmbeddedElector elector) {
     this.elector = elector;
   }
 
   @Override
-  public LeaderElectorService getLeaderElectorService() {
+  public EmbeddedElector getLeaderElectorService() {
     return this.elector;
   }
 
@@ -252,9 +257,9 @@ public class RMContextImpl implements RMContext {
     this.isHAEnabled = isHAEnabled;
   }
 
-  void setHAServiceState(HAServiceState haServiceState) {
-    synchronized (haServiceState) {
-      this.haServiceState = haServiceState;
+  void setHAServiceState(HAServiceState serviceState) {
+    synchronized (haServiceStateLock) {
+      this.haServiceState = serviceState;
     }
   }
 
@@ -350,7 +355,7 @@ public class RMContextImpl implements RMContext {
 
   @Override
   public HAServiceState getHAServiceState() {
-    synchronized (haServiceState) {
+    synchronized (haServiceStateLock) {
       return haServiceState;
     }
   }
@@ -370,9 +375,21 @@ public class RMContextImpl implements RMContext {
   }
 
   @Override
+  public void setRMTimelineCollectorManager(
+      RMTimelineCollectorManager timelineCollectorManager) {
+    activeServiceContext.setRMTimelineCollectorManager(
+        timelineCollectorManager);
+  }
+
+  @Override
+  public RMTimelineCollectorManager getRMTimelineCollectorManager() {
+    return activeServiceContext.getRMTimelineCollectorManager();
+  }
+
+  @Override
   public void setSystemMetricsPublisher(
-      SystemMetricsPublisher systemMetricsPublisher) {
-    this.systemMetricsPublisher = systemMetricsPublisher;
+      SystemMetricsPublisher metricsPublisher) {
+    this.systemMetricsPublisher = metricsPublisher;
   }
 
   @Override
@@ -485,5 +502,34 @@ public class RMContextImpl implements RMContext {
   public void setContainerQueueLimitCalculator(
       QueueLimitCalculator limitCalculator) {
     this.queueLimitCalculator = limitCalculator;
+  }
+
+  @Override
+  public void setRMAppLifetimeMonitor(
+      RMAppLifetimeMonitor rmAppLifetimeMonitor) {
+    this.activeServiceContext.setRMAppLifetimeMonitor(rmAppLifetimeMonitor);
+  }
+
+  @Override
+  public RMAppLifetimeMonitor getRMAppLifetimeMonitor() {
+    return this.activeServiceContext.getRMAppLifetimeMonitor();
+  }
+
+  public String getHAZookeeperConnectionState() {
+    if (elector == null) {
+      return "Could not find leader elector. Verify both HA and automatic " +
+          "failover are enabled.";
+    } else {
+      return elector.getZookeeperConnectionState();
+    }
+  }
+
+  @Override
+  public ResourceManager getResourceManager() {
+    return resourceManager;
+  }
+
+  public void setResourceManager(ResourceManager rm) {
+    this.resourceManager = rm;
   }
 }

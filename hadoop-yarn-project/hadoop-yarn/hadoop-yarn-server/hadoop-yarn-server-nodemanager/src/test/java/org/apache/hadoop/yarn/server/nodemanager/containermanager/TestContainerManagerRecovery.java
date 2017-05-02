@@ -22,7 +22,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.isA;
+import static org.mockito.Matchers.isA;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -50,7 +50,6 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesRequest;
-import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainerRequest;
@@ -87,6 +86,7 @@ import org.apache.hadoop.yarn.server.nodemanager.NodeStatusUpdater;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Application;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationFinishEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationImpl;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationState;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
@@ -95,14 +95,18 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.Conta
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ResourceLocalizationService;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.event.LocalizationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.LogHandler;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor.ContainersMonitor;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor.ContainersMonitorImpl;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.scheduler.ContainerScheduler;
+
 import org.apache.hadoop.yarn.server.nodemanager.metrics.NodeManagerMetrics;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMMemoryStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMNullStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMTokenSecretManagerInNM;
+import org.apache.hadoop.yarn.server.nodemanager.timelineservice.NMTimelinePublisher;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -246,8 +250,8 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
     // simulate application completion
     List<ApplicationId> finishedApps = new ArrayList<ApplicationId>();
     finishedApps.add(appId);
-    cm.handle(new CMgrCompletedAppsEvent(finishedApps,
-        CMgrCompletedAppsEvent.Reason.BY_RESOURCEMANAGER));
+    app.handle(new ApplicationFinishEvent(
+        appId, "Application killed by ResourceManager"));
     waitForAppState(app, ApplicationState.APPLICATION_RESOURCES_CLEANINGUP);
 
     // restart and verify app is marked for finishing
@@ -261,8 +265,8 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
     assertNotNull(app);
     // no longer saving FINISH_APP event in NM stateStore,
     // simulate by resending FINISH_APP event
-    cm.handle(new CMgrCompletedAppsEvent(finishedApps,
-        CMgrCompletedAppsEvent.Reason.BY_RESOURCEMANAGER));
+    app.handle(new ApplicationFinishEvent(
+        appId, "Application killed by ResourceManager"));
     waitForAppState(app, ApplicationState.APPLICATION_RESOURCES_CLEANINGUP);
     assertTrue(context.getApplicationACLsManager().checkAccess(
         UserGroupInformation.createRemoteUser(modUser),
@@ -333,8 +337,8 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
     // simulate application completion
     List<ApplicationId> finishedApps = new ArrayList<ApplicationId>();
     finishedApps.add(appId);
-    cm.handle(new CMgrCompletedAppsEvent(finishedApps,
-        CMgrCompletedAppsEvent.Reason.BY_RESOURCEMANAGER));
+    app.handle(new ApplicationFinishEvent(
+        appId, "Application killed by ResourceManager"));
     waitForAppState(app, ApplicationState.APPLICATION_RESOURCES_CLEANINGUP);
 
     app.handle(new ApplicationEvent(app.getAppId(),
@@ -355,8 +359,9 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
 
     // no longer saving FINISH_APP event in NM stateStore,
     // simulate by resending FINISH_APP event
-    cm.handle(new CMgrCompletedAppsEvent(finishedApps,
-        CMgrCompletedAppsEvent.Reason.BY_RESOURCEMANAGER));
+    app.handle(new ApplicationFinishEvent(
+        appId, "Application killed by ResourceManager"));
+
     waitForAppState(app, ApplicationState.APPLICATION_RESOURCES_CLEANINGUP);
     // TODO need to figure out why additional APPLICATION_RESOURCES_CLEANEDUP
     // is needed.
@@ -387,6 +392,7 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
     stateStore.start();
     Context context = createContext(conf, stateStore);
     ContainerManagerImpl cm = createContainerManager(context, delSrvc);
+    cm.dispatcher.disableExitOnDispatchException();
     cm.init(conf);
     cm.start();
     // add an application by starting a container
@@ -552,6 +558,35 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
           throw new YarnException("Reject this container");
         }
       }
+      @Override
+      protected ContainerScheduler createContainerScheduler(Context context) {
+        return new ContainerScheduler(context, dispatcher, metrics){
+          @Override
+          public ContainersMonitor getContainersMonitor() {
+            return new ContainersMonitorImpl(null, null, null) {
+              @Override
+              public float getVmemRatio() {
+                return 2.0f;
+              }
+
+              @Override
+              public long getVmemAllocatedForContainers() {
+                return 20480;
+              }
+
+              @Override
+              public long getPmemAllocatedForContainers() {
+                return 10240;
+              }
+
+              @Override
+              public long getVCoresAllocatedForContainers() {
+                return 4;
+              }
+            };
+          }
+        };
+      }
     };
   }
 
@@ -559,7 +594,7 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
       NMStateStoreService stateStore) {
     NMContext context = new NMContext(new NMContainerTokenSecretManager(
         conf), new NMTokenSecretManagerInNM(), null,
-        new ApplicationACLsManager(conf), stateStore, false){
+        new ApplicationACLsManager(conf), stateStore, false, conf) {
       public int getHttpPort() {
         return HTTP_PORT;
       }
@@ -666,8 +701,10 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
 
   private ContainerManagerImpl createContainerManager(Context context) {
     final LogHandler logHandler = mock(LogHandler.class);
+    final NodeManagerMetrics metrics = mock(NodeManagerMetrics.class);
     final ResourceLocalizationService rsrcSrv =
-        new ResourceLocalizationService(null, null, null, null, context) {
+        new ResourceLocalizationService(null, null, null, null, context,
+            metrics) {
           @Override
           public void serviceInit(Configuration conf) throws Exception {
           }
@@ -696,7 +733,7 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
           }
     };
 
-    return new ContainerManagerImpl(context,
+    ContainerManagerImpl containerManager = new ContainerManagerImpl(context,
         mock(ContainerExecutor.class), mock(DeletionService.class),
         mock(NodeStatusUpdater.class), metrics, null) {
           @Override
@@ -706,8 +743,10 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
           }
 
           @Override
-          protected ResourceLocalizationService createResourceLocalizationService(
-              ContainerExecutor exec, DeletionService deletionContext, Context context) {
+          protected ResourceLocalizationService
+              createResourceLocalizationService(
+              ContainerExecutor exec, DeletionService deletionContext,
+              Context context, NodeManagerMetrics metrics) {
             return rsrcSrv;
           }
 
@@ -722,6 +761,14 @@ public class TestContainerManagerRecovery extends BaseContainerManagerTest {
               boolean blockNewContainerRequests) {
             // do nothing
           }
+
+          @Override
+          public NMTimelinePublisher
+              createNMTimelinePublisher(Context context) {
+            return null;
+          }
     };
+    containerManager.dispatcher.disableExitOnDispatchException();
+    return containerManager;
   }
 }

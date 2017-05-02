@@ -29,8 +29,10 @@ import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ha.ActiveStandbyElector;
 import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.util.BasicDiskValidator;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 
@@ -83,6 +85,10 @@ public class YarnConfiguration extends Configuration {
         new DeprecationDelta("yarn.client.max-nodemanagers-proxies",
             NM_CLIENT_MAX_NM_PROXIES)
     });
+    Configuration.addDeprecations(new DeprecationDelta[] {
+        new DeprecationDelta(RM_SYSTEM_METRICS_PUBLISHER_ENABLED,
+            SYSTEM_METRICS_PUBLISHER_ENABLED)
+    });
   }
 
   //Configurations
@@ -133,6 +139,7 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_PREFIX = "yarn.resourcemanager.";
 
   public static final String RM_CLUSTER_ID = RM_PREFIX + "cluster-id";
+  public static final String DEFAULT_RM_CLUSTER_ID = "yarn_cluster";
 
   public static final String RM_HOSTNAME = RM_PREFIX + "hostname";
 
@@ -257,7 +264,17 @@ public class YarnConfiguration extends Configuration {
   public static final int DEFAULT_RM_WEBAPP_HTTPS_PORT = 8090;
   public static final String DEFAULT_RM_WEBAPP_HTTPS_ADDRESS = "0.0.0.0:"
       + DEFAULT_RM_WEBAPP_HTTPS_PORT;
-  
+
+  /**
+   * Enable YARN WebApp V2.
+   */
+  public static final String YARN_WEBAPP_UI2_ENABLE = "yarn."
+      + "webapp.ui2.enable";
+  public static final boolean DEFAULT_YARN_WEBAPP_UI2_ENABLE = false;
+
+  public static final String YARN_WEBAPP_UI2_WARFILE_PATH = "yarn."
+      + "webapp.ui2.war-file-path";
+
   public static final String RM_RESOURCE_TRACKER_ADDRESS =
     RM_PREFIX + "resource-tracker.address";
   public static final int DEFAULT_RM_RESOURCE_TRACKER_PORT = 8031;
@@ -296,94 +313,74 @@ public class YarnConfiguration extends Configuration {
   /** ACL used in case none is found. Allows nothing. */
   public static final String DEFAULT_YARN_APP_ACL = " ";
 
-  /** Is Distributed Scheduling Enabled. */
-  public static final String DIST_SCHEDULING_ENABLED =
-      YARN_PREFIX + "distributed-scheduling.enabled";
-  public static final boolean DIST_SCHEDULING_ENABLED_DEFAULT = false;
+  /** Setting that controls whether opportunistic container allocation
+   *  is enabled or not. */
+  @Unstable
+  public static final String OPPORTUNISTIC_CONTAINER_ALLOCATION_ENABLED =
+      RM_PREFIX + "opportunistic-container-allocation.enabled";
+  public static final boolean
+      DEFAULT_OPPORTUNISTIC_CONTAINER_ALLOCATION_ENABLED = false;
 
-  /** Mininum allocatable container memory for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_MIN_MEMORY =
-      YARN_PREFIX + "distributed-scheduling.min-memory";
-  public static final int DIST_SCHEDULING_MIN_MEMORY_DEFAULT = 512;
-
-  /** Mininum allocatable container vcores for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_MIN_VCORES =
-      YARN_PREFIX + "distributed-scheduling.min-vcores";
-  public static final int DIST_SCHEDULING_MIN_VCORES_DEFAULT = 1;
-
-  /** Maximum allocatable container memory for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_MAX_MEMORY =
-      YARN_PREFIX + "distributed-scheduling.max-memory";
-  public static final int DIST_SCHEDULING_MAX_MEMORY_DEFAULT = 2048;
-
-  /** Maximum allocatable container vcores for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_MAX_VCORES =
-      YARN_PREFIX + "distributed-scheduling.max-vcores";
-  public static final int DIST_SCHEDULING_MAX_VCORES_DEFAULT = 4;
-
-  /** Incremental allocatable container memory for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_INCR_MEMORY =
-      YARN_PREFIX + "distributed-scheduling.incr-memory";
-  public static final int DIST_SCHEDULING_INCR_MEMORY_DEFAULT = 512;
-
-  /** Incremental allocatable container vcores for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_INCR_VCORES =
-      YARN_PREFIX + "distributed-scheduling.incr-vcores";
-  public static final int DIST_SCHEDULING_INCR_VCORES_DEFAULT = 1;
-
-  /** Container token expiry for container allocated via Distributed
-   * Scheduling. */
-  public static final String DIST_SCHEDULING_CONTAINER_TOKEN_EXPIRY_MS =
-      YARN_PREFIX + "distributed-scheduling.container-token-expiry";
-  public static final int DIST_SCHEDULING_CONTAINER_TOKEN_EXPIRY_MS_DEFAULT =
-      600000;
-
-  /** K least loaded nodes to be provided to the LocalScheduler of a
-   * NodeManager for Distributed Scheduling. */
-  public static final String DIST_SCHEDULING_TOP_K =
-      YARN_PREFIX + "distributed-scheduling.top-k";
-  public static final int DIST_SCHEDULING_TOP_K_DEFAULT = 10;
+  /** Number of nodes to be used by the Opportunistic Container allocator for
+   * dispatching containers during container allocation. */
+  @Unstable
+  public static final String OPP_CONTAINER_ALLOCATION_NODES_NUMBER_USED =
+      RM_PREFIX + "opportunistic-container-allocation.nodes-used";
+  public static final int DEFAULT_OPP_CONTAINER_ALLOCATION_NODES_NUMBER_USED =
+      10;
 
   /** Frequency for computing least loaded NMs. */
+  @Unstable
   public static final String NM_CONTAINER_QUEUING_SORTING_NODES_INTERVAL_MS =
-      YARN_PREFIX + "nm-container-queuing.sorting-nodes-interval-ms";
+      RM_PREFIX + "nm-container-queuing.sorting-nodes-interval-ms";
   public static final long
-      NM_CONTAINER_QUEUING_SORTING_NODES_INTERVAL_MS_DEFAULT = 1000;
+      DEFAULT_NM_CONTAINER_QUEUING_SORTING_NODES_INTERVAL_MS = 1000;
 
-  /** Comparator for determining Node Load for Distributed Scheduling. */
+  /** Comparator for determining node load for scheduling of opportunistic
+   * containers. */
+  @Unstable
   public static final String NM_CONTAINER_QUEUING_LOAD_COMPARATOR =
-      YARN_PREFIX + "nm-container-queuing.load-comparator";
-  public static final String NM_CONTAINER_QUEUING_LOAD_COMPARATOR_DEFAULT =
+      RM_PREFIX + "nm-container-queuing.load-comparator";
+  public static final String DEFAULT_NM_CONTAINER_QUEUING_LOAD_COMPARATOR =
       "QUEUE_LENGTH";
 
   /** Value of standard deviation used for calculation of queue limit
    * thresholds. */
+  @Unstable
   public static final String NM_CONTAINER_QUEUING_LIMIT_STDEV =
-      YARN_PREFIX + "nm-container-queuing.queue-limit-stdev";
-  public static final float NM_CONTAINER_QUEUING_LIMIT_STDEV_DEFAULT =
+      RM_PREFIX + "nm-container-queuing.queue-limit-stdev";
+  public static final float DEFAULT_NM_CONTAINER_QUEUING_LIMIT_STDEV =
       1.0f;
 
-  /** Min length of container queue at NodeManager. */
+  /** Min length of container queue at NodeManager. This is a cluster-wide
+   * configuration that acts as the lower-bound of optimal queue length
+   * calculated by the NodeQueueLoadMonitor */
+  @Unstable
   public static final String NM_CONTAINER_QUEUING_MIN_QUEUE_LENGTH =
-      YARN_PREFIX + "nm-container-queuing.min-queue-length";
-  public static final int NM_CONTAINER_QUEUING_MIN_QUEUE_LENGTH_DEFAULT = 1;
+      RM_PREFIX + "nm-container-queuing.min-queue-length";
+  public static final int DEFAULT_NM_CONTAINER_QUEUING_MIN_QUEUE_LENGTH = 5;
 
-  /** Max length of container queue at NodeManager. */
+  /** Max length of container queue at NodeManager. This is a cluster-wide
+   * configuration that acts as the upper-bound of optimal queue length
+   * calculated by the NodeQueueLoadMonitor */
+  @Unstable
   public static final String NM_CONTAINER_QUEUING_MAX_QUEUE_LENGTH =
-      YARN_PREFIX + "nm-container-queuing.max-queue-length";
-  public static final int NM_CONTAINER_QUEUING_MAX_QUEUE_LENGTH_DEFAULT = 10;
+      RM_PREFIX + "nm-container-queuing.max-queue-length";
+  public static final int DEFAULT_NM_CONTAINER_QUEUING_MAX_QUEUE_LENGTH = 15;
 
-  /** Min wait time of container queue at NodeManager. */
+  /** Min queue wait time for a container at a NodeManager. */
+  @Unstable
   public static final String NM_CONTAINER_QUEUING_MIN_QUEUE_WAIT_TIME_MS =
-      YARN_PREFIX + "nm-container-queuing.min-queue-wait-time-ms";
-  public static final int NM_CONTAINER_QUEUING_MIN_QUEUE_WAIT_TIME_MS_DEFAULT =
-      1;
-
-  /** Max wait time of container queue at NodeManager. */
-  public static final String NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS =
-      YARN_PREFIX + "nm-container-queuing.max-queue-wait-time-ms";
-  public static final int NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS_DEFAULT =
+      RM_PREFIX + "nm-container-queuing.min-queue-wait-time-ms";
+  public static final int DEFAULT_NM_CONTAINER_QUEUING_MIN_QUEUE_WAIT_TIME_MS =
       10;
+
+  /** Max queue wait time for a container queue at a NodeManager. */
+  @Unstable
+  public static final String NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS =
+      RM_PREFIX + "nm-container-queuing.max-queue-wait-time-ms";
+  public static final int DEFAULT_NM_CONTAINER_QUEUING_MAX_QUEUE_WAIT_TIME_MS =
+      100;
 
   /**
    * Enable/disable intermediate-data encryption at YARN level. For now, this
@@ -485,16 +482,37 @@ public class YarnConfiguration extends Configuration {
 
   /**
    *  The setting that controls whether yarn system metrics is published on the
-   *  timeline server or not by RM.
+   *  timeline server or not by RM. This configuration setting is for ATS V1.
+   *  This is now deprecated in favor of SYSTEM_METRICS_PUBLISHER_ENABLED.
    */
-  public static final String RM_SYSTEM_METRICS_PUBLISHER_ENABLED =
-      RM_PREFIX + "system-metrics-publisher.enabled";
-  public static final boolean DEFAULT_RM_SYSTEM_METRICS_PUBLISHER_ENABLED = false;
+  public static final String RM_SYSTEM_METRICS_PUBLISHER_ENABLED = RM_PREFIX
+      + "system-metrics-publisher.enabled";
+  public static final boolean DEFAULT_RM_SYSTEM_METRICS_PUBLISHER_ENABLED =
+      false;
+
+  /**
+   *  The setting that controls whether yarn system metrics is published on the
+   *  timeline server or not by RM and NM. This configuration setting is for
+   *  ATS v2.
+   */
+  public static final String SYSTEM_METRICS_PUBLISHER_ENABLED = YARN_PREFIX
+      + "system-metrics-publisher.enabled";
+  public static final boolean DEFAULT_SYSTEM_METRICS_PUBLISHER_ENABLED = false;
+
+  /**
+   * The setting that controls whether yarn container events are published to
+   * the timeline service or not by RM. This configuration setting is for ATS
+   * V2
+   */
+  public static final String RM_PUBLISH_CONTAINER_EVENTS_ENABLED = YARN_PREFIX
+      + "rm.system-metrics-publisher.emit-container-events";
+  public static final boolean DEFAULT_RM_PUBLISH_CONTAINER_EVENTS_ENABLED =
+      false;
 
   public static final String RM_SYSTEM_METRICS_PUBLISHER_DISPATCHER_POOL_SIZE =
       RM_PREFIX + "system-metrics-publisher.dispatcher.pool-size";
-  public static final int DEFAULT_RM_SYSTEM_METRICS_PUBLISHER_DISPATCHER_POOL_SIZE =
-      10;
+  public static final int
+      DEFAULT_RM_SYSTEM_METRICS_PUBLISHER_DISPATCHER_POOL_SIZE = 10;
 
   //RM delegation token related keys
   public static final String RM_DELEGATION_KEY_UPDATE_INTERVAL_KEY =
@@ -509,7 +527,12 @@ public class YarnConfiguration extends Configuration {
      RM_PREFIX + "delegation.token.max-lifetime";
   public static final long RM_DELEGATION_TOKEN_MAX_LIFETIME_DEFAULT =
     7*24*60*60*1000; // 7 days
-  
+
+  public static final String RM_DELEGATION_TOKEN_MAX_CONF_SIZE =
+      RM_PREFIX + "delegation-token.max-conf-size-bytes";
+  public static final int DEFAULT_RM_DELEGATION_TOKEN_MAX_CONF_SIZE_BYTES =
+      12800;
+
   public static final String RECOVERY_ENABLED = RM_PREFIX + "recovery.enabled";
   public static final boolean DEFAULT_RM_RECOVERY_ENABLED = false;
 
@@ -544,6 +567,10 @@ public class YarnConfiguration extends Configuration {
 
   public static final String RM_ZK_TIMEOUT_MS = RM_ZK_PREFIX + "timeout-ms";
   public static final int DEFAULT_RM_ZK_TIMEOUT_MS = 10000;
+
+  public static final  String ZK_APPID_NODE_SPLIT_INDEX =
+      RM_ZK_PREFIX + "appid-node.split-index";
+  public static final int DEFAULT_ZK_APPID_NODE_SPLIT_INDEX = 0;
 
   public static final String RM_ZK_ACL = RM_ZK_PREFIX + "acl";
   public static final String DEFAULT_RM_ZK_ACL = "world:anyone:rwcda";
@@ -605,8 +632,22 @@ public class YarnConfiguration extends Configuration {
       AUTO_FAILOVER_PREFIX + "enabled";
   public static final boolean DEFAULT_AUTO_FAILOVER_ENABLED = true;
 
+  /**
+   * This property controls whether {@link ActiveStandbyElector} leader
+   * election should be used when {@link #CURATOR_LEADER_ELECTOR} is
+   * {@code false}.
+   *
+   * @deprecated This property should never be set to {@code false}.
+   */
+  @Deprecated
   public static final String AUTO_FAILOVER_EMBEDDED =
       AUTO_FAILOVER_PREFIX + "embedded";
+  /**
+   * The default value for {@link #AUTO_FAILOVER_EMBEDDED}.
+   *
+   * @deprecated The {@link #AUTO_FAILOVER_EMBEDDED} property is deprecated.
+   */
+  @Deprecated
   public static final boolean DEFAULT_AUTO_FAILOVER_EMBEDDED = true;
 
   public static final String AUTO_FAILOVER_ZK_BASE_PATH =
@@ -643,9 +684,20 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_HA_FC_ELECTOR_ZK_RETRIES_KEY = RM_HA_PREFIX
       + "failover-controller.active-standby-elector.zk.retries";
 
-  @Private
+
+  /**
+   * Whether to use the Curator-based elector for leader election.
+   *
+   * @deprecated Eventually, we want to default to the curator-based
+   * implementation and remove the {@link ActiveStandbyElector} based
+   * implementation. We should remove this config then.
+   */
+  @Unstable
+  @Deprecated
   public static final String CURATOR_LEADER_ELECTOR =
       RM_HA_PREFIX + "curator-leader-elector.enabled";
+  @Private
+  @Unstable
   public static final boolean DEFAULT_CURATOR_LEADER_ELECTOR_ENABLED = false;
 
   ////////////////////////////////
@@ -657,10 +709,6 @@ public class YarnConfiguration extends Configuration {
   /** URI for FileSystemRMStateStore */
   public static final String FS_RM_STATE_STORE_URI = RM_PREFIX
       + "fs.state-store.uri";
-  public static final String FS_RM_STATE_STORE_RETRY_POLICY_SPEC = RM_PREFIX
-      + "fs.state-store.retry-policy-spec";
-  public static final String DEFAULT_FS_RM_STATE_STORE_RETRY_POLICY_SPEC =
-      "2000, 500";
 
   public static final String FS_RM_STATE_STORE_NUM_RETRIES =
       RM_PREFIX + "fs.state-store.num-retries";
@@ -681,17 +729,29 @@ public class YarnConfiguration extends Configuration {
       + "leveldb-state-store.compaction-interval-secs";
   public static final long DEFAULT_RM_LEVELDB_COMPACTION_INTERVAL_SECS = 3600;
 
-  /** The maximum number of completed applications RM keeps. */ 
+  /**
+   * The maximum number of completed applications RM keeps. By default equals
+   * to {@link #DEFAULT_RM_MAX_COMPLETED_APPLICATIONS}.
+   */
   public static final String RM_MAX_COMPLETED_APPLICATIONS =
     RM_PREFIX + "max-completed-applications";
-  public static final int DEFAULT_RM_MAX_COMPLETED_APPLICATIONS = 10000;
+  public static final int DEFAULT_RM_MAX_COMPLETED_APPLICATIONS = 1000;
 
   /**
-   * The maximum number of completed applications RM state store keeps, by
-   * default equals to DEFAULT_RM_MAX_COMPLETED_APPLICATIONS
+   * The maximum number of completed applications RM state store keeps. By
+   * default equals to value of {@link #RM_MAX_COMPLETED_APPLICATIONS}.
    */
   public static final String RM_STATE_STORE_MAX_COMPLETED_APPLICATIONS =
       RM_PREFIX + "state-store.max-completed-applications";
+  /**
+   * The default value for
+   * {@code yarn.resourcemanager.state-store.max-completed-applications}.
+   * @deprecated This default value is ignored and will be removed in a future
+   * release. The default value of
+   * {@code yarn.resourcemanager.state-store.max-completed-applications} is the
+   * value of {@link #RM_MAX_COMPLETED_APPLICATIONS}.
+   */
+  @Deprecated
   public static final int DEFAULT_RM_STATE_STORE_MAX_COMPLETED_APPLICATIONS =
       DEFAULT_RM_MAX_COMPLETED_APPLICATIONS;
 
@@ -757,6 +817,20 @@ public class YarnConfiguration extends Configuration {
    */
   public static final String RM_PROXY_USER_PREFIX = RM_PREFIX + "proxyuser.";
 
+  /**
+   * Timeout in seconds for YARN node graceful decommission.
+   * This is the maximal time to wait for running containers and applications
+   * to complete before transition a DECOMMISSIONING node into DECOMMISSIONED.
+   */
+  public static final String RM_NODE_GRACEFUL_DECOMMISSION_TIMEOUT =
+      RM_PREFIX + "nodemanager-graceful-decommission-timeout-secs";
+  public static final int DEFAULT_RM_NODE_GRACEFUL_DECOMMISSION_TIMEOUT = 3600;
+
+  public static final String RM_DECOMMISSIONING_NODES_WATCHER_POLL_INTERVAL =
+      RM_PREFIX + "decommissioning-nodes-watcher.poll-interval-secs";
+  public static final int
+      DEFAULT_RM_DECOMMISSIONING_NODES_WATCHER_POLL_INTERVAL = 20;
+
   ////////////////////////////////
   // Node Manager Configs
   ////////////////////////////////
@@ -764,10 +838,16 @@ public class YarnConfiguration extends Configuration {
   /** Prefix for all node manager configs.*/
   public static final String NM_PREFIX = "yarn.nodemanager.";
 
-  /** Enable Queuing of <code>OPPORTUNISTIC</code> containers. */
-  public static final String NM_CONTAINER_QUEUING_ENABLED = NM_PREFIX
-      + "container-queuing-enabled";
-  public static final boolean NM_CONTAINER_QUEUING_ENABLED_DEFAULT = false;
+  /** Max Queue length of <code>OPPORTUNISTIC</code> containers on the NM. */
+  public static final String NM_OPPORTUNISTIC_CONTAINERS_MAX_QUEUE_LENGTH =
+      NM_PREFIX + "opportunistic-containers-max-queue-length";
+  public static final int DEFAULT_NM_OPPORTUNISTIC_CONTAINERS_MAX_QUEUE_LENGTH =
+      0;
+
+  /** Setting that controls whether distributed scheduling is enabled or not. */
+  public static final String DIST_SCHEDULING_ENABLED =
+      NM_PREFIX + "distributed-scheduling.enabled";
+  public static final boolean DEFAULT_DIST_SCHEDULING_ENABLED = false;
 
   /** Environment variables that will be sent to containers.*/
   public static final String NM_ADMIN_USER_ENV = NM_PREFIX + "admin-env";
@@ -813,6 +893,11 @@ public class YarnConfiguration extends Configuration {
     NM_PREFIX + "container-manager.thread-count";
   public static final int DEFAULT_NM_CONTAINER_MGR_THREAD_COUNT = 20;
   
+  /** Number of threads container manager uses.*/
+  public static final String NM_COLLECTOR_SERVICE_THREAD_COUNT =
+      NM_PREFIX + "collector-service.thread-count";
+  public static final int DEFAULT_NM_COLLECTOR_SERVICE_THREAD_COUNT = 5;
+
   /** Number of threads used in cleanup.*/
   public static final String NM_DELETE_THREAD_COUNT = 
     NM_PREFIX +  "delete.thread-count";
@@ -840,6 +925,13 @@ public class YarnConfiguration extends Configuration {
   public static final String DEFAULT_NM_LOCALIZER_ADDRESS = "0.0.0.0:" +
     DEFAULT_NM_LOCALIZER_PORT;
   
+  /** Address where the collector service IPC is.*/
+  public static final String NM_COLLECTOR_SERVICE_ADDRESS =
+      NM_PREFIX + "collector-service.address";
+  public static final int DEFAULT_NM_COLLECTOR_SERVICE_PORT = 8048;
+  public static final String DEFAULT_NM_COLLECTOR_SERVICE_ADDRESS =
+      "0.0.0.0:" + DEFAULT_NM_LOCALIZER_PORT;
+
   /** Interval in between cache cleanups.*/
   public static final String NM_LOCALIZER_CACHE_CLEANUP_INTERVAL_MS =
     NM_PREFIX + "localizer.cache.cleanup.interval-ms";
@@ -884,6 +976,10 @@ public class YarnConfiguration extends Configuration {
   public static final String NM_RESOURCEMANAGER_MINIMUM_VERSION =
       NM_PREFIX + "resourcemanager.minimum.version";
   public static final String DEFAULT_NM_RESOURCEMANAGER_MINIMUM_VERSION = "NONE";
+
+  /** Disk Validator. */
+  public static final String DISK_VALIDATOR = NM_PREFIX + "disk-validator";
+  public static final String DEFAULT_DISK_VALIDATOR = BasicDiskValidator.NAME;
 
   /**
    * Maximum size of contain's diagnostics to keep for relaunching container
@@ -1000,7 +1096,10 @@ public class YarnConfiguration extends Configuration {
 
   public static final String YARN_LOG_SERVER_URL =
     YARN_PREFIX + "log.server.url";
-  
+
+  public static final String YARN_LOG_SERVER_WEBSERVICE_URL =
+      YARN_PREFIX + "log.server.web-service.url";
+
   public static final String YARN_TRACKING_URL_GENERATOR = 
       YARN_PREFIX + "tracking.url.generator";
 
@@ -1026,7 +1125,7 @@ public class YarnConfiguration extends Configuration {
   public static final String NM_VMEM_PMEM_RATIO =
     NM_PREFIX + "vmem-pmem-ratio";
   public static final float DEFAULT_NM_VMEM_PMEM_RATIO = 2.1f;
-  
+
   /** Number of Virtual CPU Cores which can be allocated for containers.*/
   public static final String NM_VCORES = NM_PREFIX + "resource.cpu-vcores";
   public static final int DEFAULT_NM_VCORES = 8;
@@ -1179,6 +1278,10 @@ public class YarnConfiguration extends Configuration {
       NM_PREFIX + "resource-monitor.interval-ms";
   public static final int DEFAULT_NM_RESOURCE_MON_INTERVAL_MS = 3000;
 
+  public static final String NM_CONTAINER_MONITOR_ENABLED =
+      NM_PREFIX + "container-monitor.enabled";
+  public static final boolean DEFAULT_NM_CONTAINER_MONITOR_ENABLED = true;
+
   /** How often to monitor containers.*/
   public final static String NM_CONTAINER_MON_INTERVAL_MS =
     NM_PREFIX + "container-monitor.interval-ms";
@@ -1312,18 +1415,6 @@ public class YarnConfiguration extends Configuration {
   public static final String NM_CONTAINER_LOCALIZER_JAVA_OPTS_DEFAULT =
       "-Xmx256m";
 
-  /** The Docker image name(For DockerContainerExecutor).*/
-  public static final String NM_DOCKER_CONTAINER_EXECUTOR_IMAGE_NAME =
-    NM_PREFIX + "docker-container-executor.image-name";
-
-  /** The name of the docker executor (For DockerContainerExecutor).*/
-  public static final String NM_DOCKER_CONTAINER_EXECUTOR_EXEC_NAME =
-    NM_PREFIX + "docker-container-executor.exec-name";
-
-  /** The default docker executor (For DockerContainerExecutor).*/
-  public static final String NM_DEFAULT_DOCKER_CONTAINER_EXECUTOR_EXEC_NAME =
-          "/usr/bin/docker";
-
   /** Prefix for runtime configuration constants. */
   public static final String LINUX_CONTAINER_RUNTIME_PREFIX = NM_PREFIX +
       "runtime.linux.";
@@ -1393,6 +1484,26 @@ public class YarnConfiguration extends Configuration {
   public static final String DEFAULT_NM_DOCKER_DEFAULT_CONTAINER_NETWORK =
       "host";
 
+  /** The mode in which the Java Container Sandbox should run detailed by
+   *  the JavaSandboxLinuxContainerRuntime. */
+  public static final String YARN_CONTAINER_SANDBOX =
+      LINUX_CONTAINER_RUNTIME_PREFIX + "sandbox-mode";
+  public static final String DEFAULT_YARN_CONTAINER_SANDBOX = "disabled";
+
+  /** Permissions for application local directories.*/
+  public static final String YARN_CONTAINER_SANDBOX_FILE_PERMISSIONS =
+      YARN_CONTAINER_SANDBOX + ".local-dirs.permissions";
+  public static final String DEFAULT_YARN_CONTAINER_SANDBOX_FILE_PERMISSIONS =
+      "read";
+
+  /** Location for non-default java policy file.*/
+  public static final String YARN_CONTAINER_SANDBOX_POLICY =
+      YARN_CONTAINER_SANDBOX + ".policy";
+
+  /** The group which will run by default without the java security manager.*/
+  public static final String YARN_CONTAINER_SANDBOX_WHITELIST_GROUP =
+      YARN_CONTAINER_SANDBOX + ".whitelist-group";
+
   /** The path to the Linux container executor.*/
   public static final String NM_LINUX_CONTAINER_EXECUTOR_PATH =
     NM_PREFIX + "linux-container-executor.path";
@@ -1461,6 +1572,12 @@ public class YarnConfiguration extends Configuration {
       false;
 
 
+  // Configurations for applicaiton life time monitor feature
+  public static final String RM_APPLICATION_MONITOR_INTERVAL_MS =
+      RM_PREFIX + "application-timeouts.monitor.interval-ms";
+
+  public static final long DEFAULT_RM_APPLICATION_MONITOR_INTERVAL_MS =
+      3000;
 
   /**
    * Interval of time the linux container executor should try cleaning up
@@ -1653,17 +1770,21 @@ public class YarnConfiguration extends Configuration {
   public static final String YARN_APPLICATION_CLASSPATH = YARN_PREFIX
       + "application.classpath";
 
+  /** The setting that controls whether AMRMProxy is enabled or not. */
   public static final String AMRM_PROXY_ENABLED = NM_PREFIX
-      + "amrmproxy.enable";
+      + "amrmproxy.enabled";
   public static final boolean DEFAULT_AMRM_PROXY_ENABLED = false;
+
   public static final String AMRM_PROXY_ADDRESS = NM_PREFIX
       + "amrmproxy.address";
-  public static final int DEFAULT_AMRM_PROXY_PORT = 8048;
+  public static final int DEFAULT_AMRM_PROXY_PORT = 8049;
   public static final String DEFAULT_AMRM_PROXY_ADDRESS = "0.0.0.0:"
       + DEFAULT_AMRM_PROXY_PORT;
+
   public static final String AMRM_PROXY_CLIENT_THREAD_COUNT = NM_PREFIX
       + "amrmproxy.client.thread-count";
-  public static final int DEFAULT_AMRM_PROXY_CLIENT_THREAD_COUNT = 25;
+  public static final int DEFAULT_AMRM_PROXY_CLIENT_THREAD_COUNT = 3;
+
   public static final String AMRM_PROXY_INTERCEPTOR_CLASS_PIPELINE =
       NM_PREFIX + "amrmproxy.interceptor-class.pipeline";
   public static final String DEFAULT_AMRM_PROXY_INTERCEPTOR_CLASS_PIPELINE =
@@ -1781,7 +1902,7 @@ public class YarnConfiguration extends Configuration {
   public static final float DEFAULT_TIMELINE_SERVICE_VERSION = 1.0f;
 
   /**
-   * Comma seperated list of names for UIs hosted in the timeline server
+   * Comma separated list of names for UIs hosted in the timeline server
    * (For pluggable UIs).
    */
   public static final String TIMELINE_SERVICE_UI_NAMES =
@@ -1791,7 +1912,7 @@ public class YarnConfiguration extends Configuration {
   public static final String TIMELINE_SERVICE_UI_WEB_PATH_PREFIX =
       TIMELINE_SERVICE_PREFIX + "ui-web-path.";
 
-  /** Timeline client settings */
+  /** Timeline client settings. */
   public static final String TIMELINE_SERVICE_CLIENT_PREFIX =
       TIMELINE_SERVICE_PREFIX + "client.";
 
@@ -1808,6 +1929,9 @@ public class YarnConfiguration extends Configuration {
   public static final String TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX =
       TIMELINE_SERVICE_PREFIX + "entity-group-fs-store.";
 
+  public static final String TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_CACHE_STORE =
+      TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX + "cache-store-class";
+
   public static final String TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_ACTIVE_DIR =
       TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX + "active-dir";
 
@@ -1823,6 +1947,14 @@ public class YarnConfiguration extends Configuration {
 
   public static final String TIMELINE_SERVICE_ENTITY_GROUP_PLUGIN_CLASSES =
       TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX + "group-id-plugin-classes";
+
+  public static final String TIMELINE_SERVICE_ENTITY_GROUP_PLUGIN_CLASSPATH =
+      TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX
+          + "group-id-plugin-classpath";
+
+  public static final String TIMELINE_SERVICE_ENTITY_GROUP_PLUGIN_SYSTEM_CLASSES
+      = TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX
+          + "group-id-plugin-system-classes";
 
   public static final String
       TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_SUMMARY_STORE =
@@ -1872,13 +2004,6 @@ public class YarnConfiguration extends Configuration {
       TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_UNKNOWN_ACTIVE_SECONDS_DEFAULT
       = 24 * 60 * 60;
 
-  public static final String
-      TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_RETRY_POLICY_SPEC =
-      TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX + "retry-policy-spec";
-  public static final String
-      DEFAULT_TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_RETRY_POLICY_SPEC =
-      "2000, 500";
-
   public static final String TIMELINE_SERVICE_LEVELDB_CACHE_READ_CACHE_SIZE =
       TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_PREFIX
           + "leveldb-cache-read-cache-size";
@@ -1918,6 +2043,72 @@ public class YarnConfiguration extends Configuration {
   public static final String TIMELINE_SERVICE_ENTITYFILE_FS_SUPPORT_APPEND
       = TIMELINE_SERVICE_PREFIX
       + "entity-file.fs-support-append";
+
+  /**
+   * Settings for timeline service v2.0
+   */
+  public static final String TIMELINE_SERVICE_WRITER_CLASS =
+      TIMELINE_SERVICE_PREFIX + "writer.class";
+
+  public static final String DEFAULT_TIMELINE_SERVICE_WRITER_CLASS =
+      "org.apache.hadoop.yarn.server.timelineservice"
+          + ".storage.HBaseTimelineWriterImpl";
+
+  public static final String TIMELINE_SERVICE_READER_CLASS =
+      TIMELINE_SERVICE_PREFIX + "reader.class";
+
+  public static final String DEFAULT_TIMELINE_SERVICE_READER_CLASS =
+      "org.apache.hadoop.yarn.server.timelineservice" +
+          ".storage.HBaseTimelineReaderImpl";
+
+
+  /** The setting that controls how often the timeline collector flushes the
+   * timeline writer.
+   */
+  public static final String TIMELINE_SERVICE_WRITER_FLUSH_INTERVAL_SECONDS =
+      TIMELINE_SERVICE_PREFIX + "writer.flush-interval-seconds";
+
+  public static final int
+      DEFAULT_TIMELINE_SERVICE_WRITER_FLUSH_INTERVAL_SECONDS = 60;
+
+  /**
+   * The name for setting that controls how long the final value of
+   * a metric of a completed app is retained before merging
+   * into the flow sum.
+   */
+  public static final String APP_FINAL_VALUE_RETENTION_THRESHOLD =
+      TIMELINE_SERVICE_PREFIX
+      + "hbase.coprocessor.app-final-value-retention-milliseconds";
+
+  /**
+   * The setting that controls how long the final value of a metric of a
+   * completed app is retained before merging into the flow sum. Up to this time
+   * after an application is completed out-of-order values that arrive can be
+   * recognized and discarded at the cost of increased storage.
+   */
+  public static final long DEFAULT_APP_FINAL_VALUE_RETENTION_THRESHOLD = 3 * 24
+      * 60 * 60 * 1000L;
+
+  public static final String ATS_APP_COLLECTOR_LINGER_PERIOD_IN_MS =
+      TIMELINE_SERVICE_PREFIX + "app-collector.linger-period.ms";
+
+  public static final int DEFAULT_ATS_APP_COLLECTOR_LINGER_PERIOD_IN_MS = 1000;
+
+  public static final String NUMBER_OF_ASYNC_ENTITIES_TO_MERGE =
+      TIMELINE_SERVICE_PREFIX
+          + "timeline-client.number-of-async-entities-to-merge";
+
+  public static final int DEFAULT_NUMBER_OF_ASYNC_ENTITIES_TO_MERGE = 10;
+
+
+  /**
+   * The time period for which timeline v2 client will wait for draining
+   * leftover entities after stop.
+   */
+  public static final String TIMELINE_V2_CLIENT_DRAIN_TIME_MILLIS =
+      TIMELINE_SERVICE_CLIENT_PREFIX + "drain-entities.timeout.ms";
+  public static final long DEFAULT_TIMELINE_V2_CLIENT_DRAIN_TIME_MILLIS
+      = 2000L;
 
   // mark app-history related configs @Private as application history is going
   // to be integrated into the timeline service
@@ -1977,6 +2168,7 @@ public class YarnConfiguration extends Configuration {
   /** The listening endpoint for the timeline service application.*/
   public static final String TIMELINE_SERVICE_BIND_HOST =
       TIMELINE_SERVICE_PREFIX + "bind-host";
+  public static final String DEFAULT_TIMELINE_SERVICE_BIND_HOST = "0.0.0.0";
 
   /** The number of threads to handle client RPC API requests. */
   public static final String TIMELINE_SERVICE_HANDLER_THREAD_COUNT =
@@ -2171,6 +2363,16 @@ public class YarnConfiguration extends Configuration {
       TIMELINE_SERVICE_PREFIX + "delegation.token.max-lifetime";
   public static final long    DEFAULT_TIMELINE_DELEGATION_TOKEN_MAX_LIFETIME =
       7*24*60*60*1000; // 7 days
+
+  // Timeline service v2 offlien aggregation related keys
+  public static final String TIMELINE_OFFLINE_AGGREGATION_PREFIX =
+      YarnConfiguration.TIMELINE_SERVICE_PREFIX + "aggregation.offline.";
+  public static final String PHOENIX_OFFLINE_STORAGE_CONN_STR
+      = TIMELINE_OFFLINE_AGGREGATION_PREFIX
+          + "phoenix.connectionString";
+
+  public static final String PHOENIX_OFFLINE_STORAGE_CONN_STR_DEFAULT
+      = "jdbc:phoenix:localhost:2181:/hbase";
 
   // ///////////////////////////////
   // Shared Cache Configs
@@ -2440,11 +2642,7 @@ public class YarnConfiguration extends Configuration {
   /** URI for NodeLabelManager */
   public static final String FS_NODE_LABELS_STORE_ROOT_DIR = NODE_LABELS_PREFIX
       + "fs-store.root-dir";
-  public static final String FS_NODE_LABELS_STORE_RETRY_POLICY_SPEC =
-      NODE_LABELS_PREFIX + "fs-store.retry-policy-spec";
-  public static final String DEFAULT_FS_NODE_LABELS_STORE_RETRY_POLICY_SPEC =
-      "2000, 500";
-  
+
   /**
    * Flag to indicate if the node labels feature enabled, by default it's
    * disabled
@@ -2472,6 +2670,11 @@ public class YarnConfiguration extends Configuration {
       YARN_PREFIX + "cluster.max-application-priority";
 
   public static final int DEFAULT_CLUSTER_LEVEL_APPLICATION_PRIORITY = 0;
+
+  public static final String APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC =
+      YARN_PREFIX + "app.attempt.diagnostics.limit.kc";
+
+  public static final int DEFAULT_APP_ATTEMPT_DIAGNOSTICS_LIMIT_KC = 64;
 
   @Private
   public static boolean isDistributedNodeLabelConfiguration(Configuration conf) {
@@ -2561,7 +2764,7 @@ public class YarnConfiguration extends Configuration {
       RM_PREFIX + "am-scheduling.node-blacklisting-enabled";
   @Private
   public static final boolean DEFAULT_AM_SCHEDULING_NODE_BLACKLISTING_ENABLED =
-      true;
+      false;
 
   @Private
   /**
@@ -2571,7 +2774,7 @@ public class YarnConfiguration extends Configuration {
       RM_PREFIX + "am-scheduling.node-blacklisting-disable-threshold";
   @Private
   public static final float
-      DEFAULT_AM_SCHEDULING_NODE_BLACKLISTING_DISABLE_THRESHOLD = 0.8f;
+      DEFAULT_AM_SCHEDULING_NODE_BLACKLISTING_DISABLE_THRESHOLD = 0.2f;
 
   private static final String NM_SCRIPT_BASED_NODE_LABELS_PROVIDER_PREFIX =
       NM_NODE_LABELS_PROVIDER_PREFIX + "script.";
@@ -2638,7 +2841,7 @@ public class YarnConfiguration extends Configuration {
 
   /**
    * Get the socket address for <code>name</code> property as a
-   * <code>InetSocketAddress</code>. On a HA cluster,
+   * <code>InetSocketAddress</code>. On an HA cluster,
    * this fetches the address corresponding to the RM identified by
    * {@link #RM_HA_ID}.
    * @param name property name.
@@ -2712,6 +2915,65 @@ public class YarnConfiguration extends Configuration {
           YarnConfiguration.RM_CLUSTER_ID);
     }
     return clusterId;
+  }
+
+  public static boolean isDistSchedulingEnabled(Configuration conf) {
+    return conf.getBoolean(YarnConfiguration.DIST_SCHEDULING_ENABLED,
+        YarnConfiguration.DEFAULT_DIST_SCHEDULING_ENABLED);
+  }
+
+  public static boolean isOpportunisticContainerAllocationEnabled(
+      Configuration conf) {
+    return conf.getBoolean(
+        YarnConfiguration.OPPORTUNISTIC_CONTAINER_ALLOCATION_ENABLED,
+        YarnConfiguration.DEFAULT_OPPORTUNISTIC_CONTAINER_ALLOCATION_ENABLED);
+  }
+
+  // helper methods for timeline service configuration
+  /**
+   * Returns whether the timeline service is enabled via configuration.
+   *
+   * @param conf the configuration
+   * @return whether the timeline service is enabled.
+   */
+  public static boolean timelineServiceEnabled(Configuration conf) {
+    return conf.getBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED,
+      YarnConfiguration.DEFAULT_TIMELINE_SERVICE_ENABLED);
+  }
+
+  /**
+   * Returns the timeline service version. It does not check whether the
+   * timeline service itself is enabled.
+   *
+   * @param conf the configuration
+   * @return the timeline service version as a float.
+   */
+  public static float getTimelineServiceVersion(Configuration conf) {
+    return conf.getFloat(TIMELINE_SERVICE_VERSION,
+        DEFAULT_TIMELINE_SERVICE_VERSION);
+  }
+
+  /**
+   * Returns whether the timeline service v.2 is enabled via configuration.
+   *
+   * @param conf the configuration
+   * @return whether the timeline service v.2 is enabled. V.2 refers to a
+   * version greater than equal to 2 but smaller than 3.
+   */
+  public static boolean timelineServiceV2Enabled(Configuration conf) {
+    return timelineServiceEnabled(conf) &&
+        (int)getTimelineServiceVersion(conf) == 2;
+  }
+
+  /**
+   * Returns whether the system publisher is enabled.
+   *
+   * @param conf the configuration
+   * @return whether the system publisher is enabled.
+   */
+  public static boolean systemMetricsPublisherEnabled(Configuration conf) {
+    return conf.getBoolean(YarnConfiguration.SYSTEM_METRICS_PUBLISHER_ENABLED,
+        YarnConfiguration.DEFAULT_SYSTEM_METRICS_PUBLISHER_ENABLED);
   }
 
   /* For debugging. mp configurations to system output as XML format. */

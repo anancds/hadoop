@@ -17,16 +17,20 @@
  */
 package org.apache.hadoop.yarn.server.resourcemanager.webapp.dao;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import javax.xml.bind.annotation.XmlAccessType;
 import javax.xml.bind.annotation.XmlAccessorType;
+import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
 import javax.xml.bind.annotation.XmlTransient;
 
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
+import org.apache.hadoop.yarn.api.records.ApplicationTimeoutType;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
@@ -37,7 +41,9 @@ import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
-import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
@@ -82,6 +88,7 @@ public class AppInfo {
   protected long elapsedTime;
   protected String amContainerLogs;
   protected String amHostHttpAddress;
+  private String amRPCAddress;
   protected long allocatedMB;
   protected long allocatedVCores;
   protected int runningContainers;
@@ -95,13 +102,21 @@ public class AppInfo {
   protected long preemptedResourceVCores;
   protected int numNonAMContainerPreempted;
   protected int numAMContainerPreempted;
+  private long preemptedMemorySeconds;
+  private long preemptedVcoreSeconds;
 
-  protected List<ResourceRequest> resourceRequests;
+  // list of resource requests
+  @XmlElement(name = "resourceRequests")
+  private List<ResourceRequestInfo> resourceRequests =
+      new ArrayList<ResourceRequestInfo>();
 
   protected LogAggregationStatus logAggregationStatus;
   protected boolean unmanagedApplication;
   protected String appNodeLabelExpression;
   protected String amNodeLabelExpression;
+
+  protected ResourcesInfo resourceInfo = null;
+  protected AppTimeoutsInfo timeouts = new AppTimeoutsInfo();
 
   public AppInfo() {
   } // JAXB needs this
@@ -136,10 +151,9 @@ public class AppInfo {
       this.name = app.getName().toString();
       this.queue = app.getQueue().toString();
       this.priority = 0;
-      ApplicationSubmissionContext appSubmissionContext =
-          app.getApplicationSubmissionContext();
-      if (appSubmissionContext.getPriority() != null) {
-        this.priority = appSubmissionContext.getPriority()
+
+      if (app.getApplicationPriority() != null) {
+        this.priority = app.getApplicationPriority()
             .getPriority();
       }
       this.progress = app.getProgress() * 100;
@@ -168,7 +182,9 @@ public class AppInfo {
                 masterContainer.getId().toString(), app.getUser());
             this.amHostHttpAddress = masterContainer.getNodeHttpAddress();
           }
-          
+
+          this.amRPCAddress = getAmRPCAddressFromRMAppAttempt(attempt);
+
           ApplicationResourceUsageReport resourceReport = attempt
               .getApplicationResourceUsageReport();
           if (resourceReport != null) {
@@ -179,8 +195,16 @@ public class AppInfo {
             queueUsagePercentage = resourceReport.getQueueUsagePercentage();
             clusterUsagePercentage = resourceReport.getClusterUsagePercentage();
           }
-          resourceRequests = rm.getRMContext().getScheduler()
+
+          List<ResourceRequest> resourceRequestsRaw = rm.getRMContext()
+              .getScheduler()
               .getPendingResourceRequestsForAttempt(attempt.getAppAttemptId());
+
+          if (resourceRequestsRaw != null) {
+            for (ResourceRequest req : resourceRequestsRaw) {
+              resourceRequests.add(new ResourceRequestInfo(req));
+            }
+          }
         }
       }
 
@@ -196,12 +220,54 @@ public class AppInfo {
           appMetrics.getResourcePreempted().getVirtualCores();
       memorySeconds = appMetrics.getMemorySeconds();
       vcoreSeconds = appMetrics.getVcoreSeconds();
+      preemptedMemorySeconds = appMetrics.getPreemptedMemorySeconds();
+      preemptedVcoreSeconds = appMetrics.getPreemptedVcoreSeconds();
+      ApplicationSubmissionContext appSubmissionContext =
+          app.getApplicationSubmissionContext();
       unmanagedApplication =
           appSubmissionContext.getUnmanagedAM();
       appNodeLabelExpression =
           app.getApplicationSubmissionContext().getNodeLabelExpression();
       amNodeLabelExpression = (unmanagedApplication) ? null
-          : app.getAMResourceRequest().getNodeLabelExpression();
+          : app.getAMResourceRequests().get(0).getNodeLabelExpression();
+
+      // Setting partition based resource usage of application
+      ResourceScheduler scheduler = rm.getRMContext().getScheduler();
+      if (scheduler instanceof CapacityScheduler) {
+        RMAppAttempt attempt = app.getCurrentAppAttempt();
+        if (null != attempt) {
+          FiCaSchedulerApp ficaAppAttempt = ((CapacityScheduler) scheduler)
+              .getApplicationAttempt(attempt.getAppAttemptId());
+          resourceInfo = null != ficaAppAttempt
+              ? new ResourcesInfo(ficaAppAttempt.getSchedulingResourceUsage())
+              : null;
+        }
+      }
+
+      Map<ApplicationTimeoutType, Long> applicationTimeouts =
+          app.getApplicationTimeouts();
+      if (applicationTimeouts.isEmpty()) {
+        // If application is not set timeout, lifetime should be sent as default
+        // with expiryTime=UNLIMITED and remainingTime=-1
+        AppTimeoutInfo timeoutInfo = new AppTimeoutInfo();
+        timeoutInfo.setTimeoutType(ApplicationTimeoutType.LIFETIME);
+        timeouts.add(timeoutInfo);
+      } else {
+        for (Map.Entry<ApplicationTimeoutType, Long> entry : app
+            .getApplicationTimeouts().entrySet()) {
+          AppTimeoutInfo timeout = new AppTimeoutInfo();
+          timeout.setTimeoutType(entry.getKey());
+          long timeoutInMillis = entry.getValue().longValue();
+          timeout.setExpiryTime(Times.formatISO8601(timeoutInMillis));
+          if (app.isAppInCompletedStates()) {
+            timeout.setRemainingTime(0);
+          } else {
+            timeout.setRemainingTime(Math
+                .max((timeoutInMillis - System.currentTimeMillis()) / 1000, 0));
+          }
+          timeouts.add(timeout);
+        }
+      }
     }
   }
 
@@ -281,6 +347,22 @@ public class AppInfo {
     return this.amHostHttpAddress;
   }
 
+  public String getAmRPCAddress() {
+    return amRPCAddress;
+  }
+
+  static public String getAmRPCAddressFromRMAppAttempt(RMAppAttempt attempt) {
+    String amRPCAddress = null;
+    if (attempt != null) {
+      String amHost = attempt.getHost();
+      int amRpcPort = attempt.getRpcPort();
+      if (!"N/A".equals(amHost) && amRpcPort != -1) {
+        amRPCAddress = amHost + ":" + amRpcPort;
+      }
+    }
+    return amRPCAddress;
+  }
+
   public boolean amContainerLogsExist() {
     return this.amContainerLogsExist;
   }
@@ -333,7 +415,14 @@ public class AppInfo {
     return vcoreSeconds;
   }
 
-  public List<ResourceRequest> getResourceRequests() {
+  public long getPreemptedMemorySeconds() {
+    return preemptedMemorySeconds;
+  }
+
+  public long getPreemptedVcoreSeconds() {
+    return preemptedVcoreSeconds;
+  }
+  public List<ResourceRequestInfo> getResourceRequests() {
     return this.resourceRequests;
   }
 
@@ -355,5 +444,9 @@ public class AppInfo {
 
   public String getAmNodeLabelExpression() {
     return this.amNodeLabelExpression;
+  }
+
+  public ResourcesInfo getResourceInfo() {
+    return resourceInfo;
   }
 }

@@ -65,7 +65,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Ap
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
 
-import org.apache.hadoop.yarn.server.nodemanager.scheduler.LocalScheduler;
+import org.apache.hadoop.yarn.server.nodemanager.scheduler.DistributedScheduler;
 import org.apache.hadoop.yarn.server.security.MasterKeyData;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.server.utils.YarnServerSecurityUtils;
@@ -79,7 +79,7 @@ import com.google.common.base.Preconditions;
  * to intercept and inspect messages from application master to the cluster
  * resource manager. It listens to messages from the application master and
  * creates a request intercepting pipeline instance for each application. The
- * pipeline is a chain of intercepter instances that can inspect and modify the
+ * pipeline is a chain of interceptor instances that can inspect and modify the
  * request/response as needed.
  */
 public class AMRMProxyService extends AbstractService implements
@@ -342,8 +342,13 @@ public class AMRMProxyService extends AbstractService implements
     // check to see if the RM has issued a new AMRMToken & accordingly update
     // the real ARMRMToken in the current context
     if (allocateResponse.getAMRMToken() != null) {
+      LOG.info("RM rolled master-key for amrm-tokens");
+
       org.apache.hadoop.yarn.api.records.Token token =
           allocateResponse.getAMRMToken();
+
+      // Do not propagate this info back to AM
+      allocateResponse.setAMRMToken(null);
 
       org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> newTokenId =
           new org.apache.hadoop.security.token.Token<AMRMTokenIdentifier>(
@@ -467,10 +472,9 @@ public class AMRMProxyService extends AbstractService implements
       interceptorClassNames.add(item.trim());
     }
 
-    // Make sure LocalScheduler is present at the beginning
-    // of the chain..
+    // Make sure DistributedScheduler is present at the beginning of the chain.
     if (this.nmContext.isDistributedSchedulingEnabled()) {
-      interceptorClassNames.add(0, LocalScheduler.class.getName());
+      interceptorClassNames.add(0, DistributedScheduler.class.getName());
     }
 
     return interceptorClassNames;
@@ -550,7 +554,9 @@ public class AMRMProxyService extends AbstractService implements
           AMRMProxyService.this.stopApplication(event.getApplicationID());
           break;
         default:
-          LOG.debug("AMRMProxy is ignoring event: " + event.getType());
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("AMRMProxy is ignoring event: " + event.getType());
+          }
           break;
         }
       } else {

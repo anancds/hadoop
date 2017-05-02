@@ -22,10 +22,13 @@ import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
@@ -41,6 +44,7 @@ import org.apache.hadoop.util.Time;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.fs.StorageType;
 
 /**
  * BlockTokenSecretManager can be instantiated in 2 modes, master mode
@@ -75,6 +79,7 @@ public class BlockTokenSecretManager extends
 
   private final int intRange;
   private final int nnRangeStart;
+  private final boolean useProto;
 
   private final SecureRandom nonceGenerator = new SecureRandom();
 
@@ -83,11 +88,13 @@ public class BlockTokenSecretManager extends
    *
    * @param keyUpdateInterval how often a new key will be generated
    * @param tokenLifetime how long an individual token is valid
+   * @param useProto should we use new protobuf style tokens
    */
   public BlockTokenSecretManager(long keyUpdateInterval,
-      long tokenLifetime, String blockPoolId, String encryptionAlgorithm) {
+      long tokenLifetime, String blockPoolId, String encryptionAlgorithm,
+      boolean useProto) {
     this(false, keyUpdateInterval, tokenLifetime, blockPoolId,
-        encryptionAlgorithm, 0, 1);
+        encryptionAlgorithm, 0, 1, useProto);
   }
 
   /**
@@ -102,8 +109,9 @@ public class BlockTokenSecretManager extends
    */
   public BlockTokenSecretManager(long keyUpdateInterval,
       long tokenLifetime, int nnIndex, int numNNs,  String blockPoolId,
-      String encryptionAlgorithm) {
-    this(true, keyUpdateInterval, tokenLifetime, blockPoolId, encryptionAlgorithm, nnIndex, numNNs);
+      String encryptionAlgorithm, boolean useProto) {
+    this(true, keyUpdateInterval, tokenLifetime, blockPoolId,
+        encryptionAlgorithm, nnIndex, numNNs, useProto);
     Preconditions.checkArgument(nnIndex >= 0);
     Preconditions.checkArgument(numNNs > 0);
     setSerialNo(new SecureRandom().nextInt());
@@ -111,7 +119,8 @@ public class BlockTokenSecretManager extends
   }
 
   private BlockTokenSecretManager(boolean isMaster, long keyUpdateInterval,
-      long tokenLifetime, String blockPoolId, String encryptionAlgorithm, int nnIndex, int numNNs) {
+      long tokenLifetime, String blockPoolId, String encryptionAlgorithm,
+      int nnIndex, int numNNs, boolean useProto) {
     this.intRange = Integer.MAX_VALUE / numNNs;
     this.nnRangeStart = intRange * nnIndex;
     this.isMaster = isMaster;
@@ -120,6 +129,7 @@ public class BlockTokenSecretManager extends
     this.allKeys = new HashMap<Integer, BlockKey>();
     this.blockPoolId = blockPoolId;
     this.encryptionAlgorithm = encryptionAlgorithm;
+    this.useProto = useProto;
     generateKeys();
   }
 
@@ -236,17 +246,19 @@ public class BlockTokenSecretManager extends
 
   /** Generate an block token for current user */
   public Token<BlockTokenIdentifier> generateToken(ExtendedBlock block,
-      EnumSet<BlockTokenIdentifier.AccessMode> modes) throws IOException {
+      EnumSet<BlockTokenIdentifier.AccessMode> modes,
+      StorageType[] storageTypes) throws IOException {
     UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
     String userID = (ugi == null ? null : ugi.getShortUserName());
-    return generateToken(userID, block, modes);
+    return generateToken(userID, block, modes, storageTypes);
   }
 
   /** Generate a block token for a specified user */
   public Token<BlockTokenIdentifier> generateToken(String userId,
-      ExtendedBlock block, EnumSet<BlockTokenIdentifier.AccessMode> modes) throws IOException {
+      ExtendedBlock block, EnumSet<BlockTokenIdentifier.AccessMode> modes,
+      StorageType[] storageTypes) throws IOException {
     BlockTokenIdentifier id = new BlockTokenIdentifier(userId, block
-        .getBlockPoolId(), block.getBlockId(), modes);
+        .getBlockPoolId(), block.getBlockId(), modes, storageTypes, useProto);
     return new Token<BlockTokenIdentifier>(id, this);
   }
 
@@ -254,9 +266,22 @@ public class BlockTokenSecretManager extends
    * Check if access should be allowed. userID is not checked if null. This
    * method doesn't check if token password is correct. It should be used only
    * when token password has already been verified (e.g., in the RPC layer).
+   *
+   * Some places need to check the access using StorageTypes and for other
+   * places the StorageTypes is not relevant.
    */
   public void checkAccess(BlockTokenIdentifier id, String userId,
-      ExtendedBlock block, BlockTokenIdentifier.AccessMode mode) throws InvalidToken {
+      ExtendedBlock block, BlockTokenIdentifier.AccessMode mode,
+      StorageType[] storageTypes) throws InvalidToken {
+    checkAccess(id, userId, block, mode);
+    if (storageTypes != null && storageTypes.length > 0) {
+      checkAccess(id.getStorageTypes(), storageTypes);
+    }
+  }
+
+  public void checkAccess(BlockTokenIdentifier id, String userId,
+      ExtendedBlock block, BlockTokenIdentifier.AccessMode mode)
+      throws InvalidToken {
     if (LOG.isDebugEnabled()) {
       LOG.debug("Checking access for user=" + userId + ", block=" + block
           + ", access mode=" + mode + " using " + id.toString());
@@ -283,9 +308,41 @@ public class BlockTokenSecretManager extends
     }
   }
 
+  /**
+   * Check if the requested StorageTypes match the StorageTypes in the
+   * BlockTokenIdentifier.
+   * Empty candidateStorageTypes specifiers mean 'all is permitted'. They
+   * would otherwise be nonsensical.
+   */
+  public static void checkAccess(StorageType[] candidateStorageTypes,
+      StorageType[] storageTypesRequested) throws InvalidToken {
+    if (storageTypesRequested.length == 0) {
+      throw new InvalidToken("The request has no StorageTypes. "
+          + "This is probably a configuration error.");
+    }
+    if (candidateStorageTypes.length == 0) {
+      return;
+    }
+
+    List<StorageType> unseenCandidates = new ArrayList<StorageType>();
+    unseenCandidates.addAll(Arrays.asList(candidateStorageTypes));
+    for (StorageType storageType : storageTypesRequested) {
+      final int index = unseenCandidates.indexOf(storageType);
+      if (index == -1) {
+        throw new InvalidToken("Block token with StorageTypes "
+            + Arrays.toString(candidateStorageTypes)
+            + " not valid for access with StorageTypes "
+            + Arrays.toString(storageTypesRequested));
+      }
+      Collections.swap(unseenCandidates, index, unseenCandidates.size()-1);
+      unseenCandidates.remove(unseenCandidates.size()-1);
+    }
+  }
+
   /** Check if access should be allowed. userID is not checked if null */
   public void checkAccess(Token<BlockTokenIdentifier> token, String userId,
-      ExtendedBlock block, BlockTokenIdentifier.AccessMode mode) throws InvalidToken {
+      ExtendedBlock block, BlockTokenIdentifier.AccessMode mode,
+      StorageType[] storageTypes) throws InvalidToken {
     BlockTokenIdentifier id = new BlockTokenIdentifier();
     try {
       id.readFields(new DataInputStream(new ByteArrayInputStream(token
@@ -295,7 +352,7 @@ public class BlockTokenSecretManager extends
           "Unable to de-serialize block token identifier for user=" + userId
               + ", block=" + block + ", access mode=" + mode);
     }
-    checkAccess(id, userId, block, mode);
+    checkAccess(id, userId, block, mode, storageTypes);
     if (!Arrays.equals(retrievePassword(id), token.getPassword())) {
       throw new InvalidToken("Block token with " + id.toString()
           + " doesn't have the correct token password");
@@ -433,6 +490,12 @@ public class BlockTokenSecretManager extends
   @VisibleForTesting
   public void clearAllKeysForTesting() {
     allKeys.clear();
+  }
+
+  @VisibleForTesting
+  public synchronized boolean hasKey(int keyId) {
+    BlockKey key = allKeys.get(keyId);
+    return key != null;
   }
 
   @VisibleForTesting

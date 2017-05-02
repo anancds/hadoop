@@ -23,6 +23,7 @@ import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSPacket;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
 import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
@@ -30,6 +31,8 @@ import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.protocol.datatransfer.sasl.DataEncryptionKeyFactory;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
+import org.apache.hadoop.io.ByteBufferPool;
+import org.apache.hadoop.io.ElasticByteBufferPool;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.token.Token;
@@ -65,6 +68,7 @@ class StripedBlockWriter {
   private ByteBuffer targetBuffer;
   private long blockOffset4Target = 0;
   private long seqNo4Target = 0;
+  private static final ByteBufferPool BUFFER_POOL = new ElasticByteBufferPool();
 
   StripedBlockWriter(StripedWriter stripedWriter, DataNode datanode,
                      Configuration conf, ExtendedBlock block,
@@ -85,6 +89,10 @@ class StripedBlockWriter {
 
   ByteBuffer getTargetBuffer() {
     return targetBuffer;
+  }
+
+  void freeTargetBuffer() {
+    targetBuffer = null;
   }
 
   /**
@@ -108,7 +116,8 @@ class StripedBlockWriter {
 
       Token<BlockTokenIdentifier> blockToken =
           datanode.getBlockAccessToken(block,
-              EnumSet.of(BlockTokenIdentifier.AccessMode.WRITE));
+              EnumSet.of(BlockTokenIdentifier.AccessMode.WRITE),
+              new StorageType[]{storageType});
 
       long writeTimeout = datanode.getDnConf().getSocketWriteTimeout();
       OutputStream unbufOut = NetUtils.getOutputStream(socket, writeTimeout);
@@ -125,7 +134,8 @@ class StripedBlockWriter {
           DFSUtilClient.getSmallBufferSize(conf)));
       in = new DataInputStream(unbufIn);
 
-      DatanodeInfo source = new DatanodeInfo(datanode.getDatanodeId());
+      DatanodeInfo source = new DatanodeInfoBuilder()
+          .setNodeID(datanode.getDatanodeId()).build();
       new Sender(out).writeBlock(block, storageType,
           blockToken, "", new DatanodeInfo[]{target},
           new StorageType[]{storageType}, source,
@@ -154,9 +164,18 @@ class StripedBlockWriter {
       return;
     }
 
-    stripedWriter.getChecksum().calculateChunkedSums(
-        targetBuffer.array(), 0, targetBuffer.remaining(),
-        stripedWriter.getChecksumBuf(), 0);
+    if (targetBuffer.isDirect()) {
+      ByteBuffer directCheckSumBuf =
+          BUFFER_POOL.getBuffer(true, stripedWriter.getChecksumBuf().length);
+      stripedWriter.getChecksum().calculateChunkedSums(
+          targetBuffer, directCheckSumBuf);
+      directCheckSumBuf.get(stripedWriter.getChecksumBuf());
+      BUFFER_POOL.putBuffer(directCheckSumBuf);
+    } else {
+      stripedWriter.getChecksum().calculateChunkedSums(
+          targetBuffer.array(), 0, targetBuffer.remaining(),
+          stripedWriter.getChecksumBuf(), 0);
+    }
 
     int ckOff = 0;
     while (targetBuffer.remaining() > 0) {
@@ -178,6 +197,7 @@ class StripedBlockWriter {
       packet.writeTo(targetOutputStream);
 
       blockOffset4Target += toWrite;
+      stripedWriter.getReconstructor().incrBytesWritten(toWrite);
     }
   }
 

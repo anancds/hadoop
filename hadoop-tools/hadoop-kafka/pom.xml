@@ -19,11 +19,11 @@
   <parent>
     <groupId>org.apache.hadoop</groupId>
     <artifactId>hadoop-project</artifactId>
-    <version>3.0.0-alpha1-SNAPSHOT</version>
+    <version>3.0.0-alpha3-SNAPSHOT</version>
     <relativePath>../../hadoop-project</relativePath>
   </parent>
   <artifactId>hadoop-kafka</artifactId>
-  <version>3.0.0-alpha1-SNAPSHOT</version>
+  <version>3.0.0-alpha3-SNAPSHOT</version>
   <name>Apache Hadoop Kafka Library support</name>
   <description>
     This module contains code to support integration with Kafka.
@@ -35,32 +35,6 @@
     <file.encoding>UTF-8</file.encoding>
     <downloadSources>true</downloadSources>
   </properties>
-
-  <profiles>
-    <profile>
-      <id>tests-off</id>
-      <activation>
-        <file>
-          <missing>src/test/resources/auth-keys.xml</missing>
-        </file>
-      </activation>
-      <properties>
-        <maven.test.skip>true</maven.test.skip>
-      </properties>
-    </profile>
-    <profile>
-      <id>tests-on</id>
-      <activation>
-        <file>
-          <exists>src/test/resources/auth-keys.xml</exists>
-        </file>
-      </activation>
-      <properties>
-        <maven.test.skip>false</maven.test.skip>
-      </properties>
-    </profile>
-
-  </profiles>
 
   <build>
     <plugins>
@@ -125,7 +99,7 @@
     <!-- see ../../hadoop-project/pom.xml for versions -->
     <dependency>
       <groupId>org.apache.kafka</groupId>
-      <artifactId>kafka_2.10</artifactId>
+      <artifactId>kafka-clients</artifactId>
       <version>${kafka.version}</version>
       <exclusions>
         <exclusion>

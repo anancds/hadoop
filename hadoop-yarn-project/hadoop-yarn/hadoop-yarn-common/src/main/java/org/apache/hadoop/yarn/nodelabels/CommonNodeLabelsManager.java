@@ -211,7 +211,7 @@ public class CommonNodeLabelsManager extends AbstractService {
   // for UT purpose
   protected void initDispatcher(Configuration conf) {
     // create async handler
-    dispatcher = new AsyncDispatcher();
+    dispatcher = new AsyncDispatcher("NodeLabelManager dispatcher");
     AsyncDispatcher asyncDispatcher = (AsyncDispatcher) dispatcher;
     asyncDispatcher.init(conf);
     asyncDispatcher.setDrainEventsOnStop();
@@ -796,6 +796,28 @@ public class CommonNodeLabelsManager extends AbstractService {
         }
       }
       return Collections.unmodifiableMap(nodeToLabels);
+    } finally {
+      readLock.unlock();
+    }
+  }
+
+  /**
+   * Get nodes that have no labels.
+   *
+   * @return set of nodes with no labels
+   */
+  public Set<NodeId> getNodesWithoutALabel() {
+    try {
+      readLock.lock();
+      Set<NodeId> nodes = new HashSet<>();
+      for (Host host : nodeCollections.values()) {
+        for (NodeId nodeId : host.nms.keySet()) {
+          if (getLabelsByNode(nodeId).isEmpty()) {
+            nodes.add(nodeId);
+          }
+        }
+      }
+      return Collections.unmodifiableSet(nodes);
     } finally {
       readLock.unlock();
     }

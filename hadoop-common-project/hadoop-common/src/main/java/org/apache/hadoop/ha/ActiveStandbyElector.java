@@ -346,8 +346,13 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
         createWithRetries(prefixPath, new byte[]{}, zkAcl, CreateMode.PERSISTENT);
       } catch (KeeperException e) {
         if (isNodeExists(e.code())) {
-          // This is OK - just ensuring existence.
-          continue;
+          // Set ACLs for parent node, if they do not exist or are different
+          try {
+            setAclsWithRetries(prefixPath);
+          } catch (KeeperException e1) {
+            throw new IOException("Couldn't set ACLs on parent ZNode: " +
+                prefixPath, e1);
+          }
         } else {
           throw new IOException("Couldn't create " + prefixPath, e);
         }
@@ -667,13 +672,13 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
 
   /**
    * Get a new zookeeper client instance. protected so that test class can
-   * inherit and pass in a mock object for zookeeper
+   * inherit and mock out the zookeeper instance
    * 
    * @return new zookeeper client instance
    * @throws IOException
    * @throws KeeperException zookeeper connectionloss exception
    */
-  protected synchronized ZooKeeper getNewZooKeeper() throws IOException,
+  protected synchronized ZooKeeper connectToZooKeeper() throws IOException,
       KeeperException {
     
     // Unfortunately, the ZooKeeper constructor connects to ZooKeeper and
@@ -682,7 +687,7 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     // we construct the watcher first, and have it block any events it receives
     // before we can set its ZooKeeper reference.
     watcher = new WatcherWithClientRef();
-    ZooKeeper zk = new ZooKeeper(zkHostPort, zkSessionTimeout, watcher);
+    ZooKeeper zk = createZooKeeper();
     watcher.setZooKeeperRef(zk);
 
     // Wait for the asynchronous success/failure. This may throw an exception
@@ -693,6 +698,17 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
       zk.addAuthInfo(auth.getScheme(), auth.getAuth());
     }
     return zk;
+  }
+
+  /**
+   * Get a new zookeeper client instance. protected so that test class can
+   * inherit and pass in a mock object for zookeeper
+   *
+   * @return new zookeeper client instance
+   * @throws IOException
+   */
+  protected ZooKeeper createZooKeeper() throws IOException {
+    return new ZooKeeper(zkHostPort, zkSessionTimeout, watcher);
   }
 
   private void fatalError(String errorMessage) {
@@ -830,7 +846,7 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
       zkClient = null;
       watcher = null;
     }
-    zkClient = getNewZooKeeper();
+    zkClient = connectToZooKeeper();
     if (LOG.isDebugEnabled()) {
       LOG.debug("Created new connection for " + this);
     }
@@ -1055,14 +1071,36 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     });
   }
 
+  private void setAclsWithRetries(final String path)
+      throws KeeperException, InterruptedException {
+    Stat stat = new Stat();
+    zkDoWithRetries(new ZKAction<Void>() {
+      @Override
+      public Void run() throws KeeperException, InterruptedException {
+        List<ACL> acl = zkClient.getACL(path, stat);
+        if (acl == null || !acl.containsAll(zkAcl) ||
+            !zkAcl.containsAll(acl)) {
+          zkClient.setACL(path, zkAcl, stat.getVersion());
+        }
+        return null;
+      }
+    }, Code.BADVERSION);
+  }
+
   private <T> T zkDoWithRetries(ZKAction<T> action) throws KeeperException,
       InterruptedException {
+    return zkDoWithRetries(action, null);
+  }
+
+  private <T> T zkDoWithRetries(ZKAction<T> action, Code retryCode)
+      throws KeeperException, InterruptedException {
     int retry = 0;
     while (true) {
       try {
         return action.run();
       } catch (KeeperException ke) {
-        if (shouldRetry(ke.code()) && ++retry < maxRetryNum) {
+        if ((shouldRetry(ke.code()) || shouldRetry(ke.code(), retryCode))
+            && ++retry < maxRetryNum) {
           continue;
         }
         throw ke;
@@ -1177,6 +1215,10 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
 
   private static boolean shouldRetry(Code code) {
     return code == Code.CONNECTIONLOSS || code == Code.OPERATIONTIMEOUT;
+  }
+
+  private static boolean shouldRetry(Code code, Code retryIfCode) {
+    return (retryIfCode == null ? false : retryIfCode == code);
   }
   
   @Override

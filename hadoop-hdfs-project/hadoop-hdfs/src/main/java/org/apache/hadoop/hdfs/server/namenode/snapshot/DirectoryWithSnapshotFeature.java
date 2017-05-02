@@ -30,7 +30,6 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
 import org.apache.hadoop.hdfs.server.namenode.AclStorage;
-import org.apache.hadoop.hdfs.server.namenode.ContentCounts;
 import org.apache.hadoop.hdfs.server.namenode.ContentSummaryComputationContext;
 import org.apache.hadoop.hdfs.server.namenode.FSImageSerialization;
 import org.apache.hadoop.hdfs.server.namenode.INode;
@@ -629,18 +628,18 @@ public class DirectoryWithSnapshotFeature implements INode.Feature {
     return counts;
   }
 
-  public void computeContentSummary4Snapshot(final BlockStoragePolicySuite bsps,
-      final ContentCounts counts) {
-    // Create a new blank summary context for blocking processing of subtree.
-    ContentSummaryComputationContext summary = 
-        new ContentSummaryComputationContext(bsps);
+  public void computeContentSummary4Snapshot(
+      ContentSummaryComputationContext context) {
     for(DirectoryDiff d : diffs) {
-      for(INode deleted : d.getChildrenDiff().getList(ListType.DELETED)) {
-        deleted.computeContentSummary(Snapshot.CURRENT_STATE_ID, summary);
+      for(INode deletedNode : d.getChildrenDiff().getList(ListType.DELETED)) {
+        context.reportDeletedSnapshottedNode(deletedNode);
+        if (deletedNode.isDirectory()){
+          DirectoryWithSnapshotFeature sf =
+              deletedNode.asDirectory().getDirectoryWithSnapshotFeature();
+          sf.computeContentSummary4Snapshot(context);
+        }
       }
     }
-    // Add the counts from deleted trees.
-    counts.addContents(summary.getCounts());
   }
   
   /**

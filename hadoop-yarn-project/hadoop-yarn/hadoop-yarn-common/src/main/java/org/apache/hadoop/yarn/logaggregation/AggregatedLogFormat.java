@@ -49,6 +49,7 @@ import org.apache.commons.io.input.BoundedInputStream;
 import org.apache.commons.io.output.WriterOutputStream;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.commons.math3.util.Pair;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
@@ -96,7 +97,9 @@ public class AggregatedLogFormat {
    */
   private static final FsPermission APP_LOG_FILE_UMASK = FsPermission
       .createImmutable((short) (0640 ^ 0777));
-
+  /** Default permission for the log file. */
+  private static final FsPermission APP_LOG_FILE_PERM =
+      FsPermission.getFileDefault().applyUMask(APP_LOG_FILE_UMASK);
 
   static {
     RESERVED_KEYS = new HashMap<String, AggregatedLogFormat.LogKey>();
@@ -307,6 +310,10 @@ public class AggregatedLogFormat {
     }
 
     private Set<File> getPendingLogFilesToUpload(File containerLogDir) {
+      if(containerLogDir == null ||
+          containerLogDir.listFiles() == null) {
+        return new HashSet<>(0);
+      }
       Set<File> candidates =
           new HashSet<File>(Arrays.asList(containerLogDir.listFiles()));
       for (File logFile : candidates) {
@@ -443,25 +450,33 @@ public class AggregatedLogFormat {
    * The writer that writes out the aggregated logs.
    */
   @Private
-  public static class LogWriter {
+  public static class LogWriter implements AutoCloseable {
 
-    private final FSDataOutputStream fsDataOStream;
-    private final TFile.Writer writer;
+    private FSDataOutputStream fsDataOStream;
+    private TFile.Writer writer;
     private FileContext fc;
 
-    public LogWriter(final Configuration conf, final Path remoteAppLogFile,
-        UserGroupInformation userUgi) throws IOException {
+    /**
+     * Initialize the LogWriter.
+     * Must be called just after the instance is created.
+     * @param conf Configuration
+     * @param remoteAppLogFile remote log file path
+     * @param userUgi Ugi of the user
+     * @throws IOException Failed to initialize
+     */
+    public void initialize(final Configuration conf,
+                           final Path remoteAppLogFile,
+                           UserGroupInformation userUgi) throws IOException {
       try {
         this.fsDataOStream =
             userUgi.doAs(new PrivilegedExceptionAction<FSDataOutputStream>() {
               @Override
               public FSDataOutputStream run() throws Exception {
                 fc = FileContext.getFileContext(remoteAppLogFile.toUri(), conf);
-                fc.setUMask(APP_LOG_FILE_UMASK);
                 return fc.create(
                     remoteAppLogFile,
                     EnumSet.of(CreateFlag.CREATE, CreateFlag.OVERWRITE),
-                    new Options.CreateOpts[] {});
+                    Options.CreateOpts.perms(APP_LOG_FILE_PERM));
               }
             });
       } catch (InterruptedException e) {
@@ -484,34 +499,34 @@ public class AggregatedLogFormat {
     }
 
     private void writeVersion() throws IOException {
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      VERSION_KEY.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      out.writeInt(VERSION);
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        VERSION_KEY.write(out);
+      }
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        out.writeInt(VERSION);
+      }
     }
 
     public void writeApplicationOwner(String user) throws IOException {
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      APPLICATION_OWNER_KEY.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      out.writeUTF(user);
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        APPLICATION_OWNER_KEY.write(out);
+      }
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        out.writeUTF(user);
+      }
     }
 
     public void writeApplicationACLs(Map<ApplicationAccessType, String> appAcls)
         throws IOException {
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      APPLICATION_ACL_KEY.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      for (Entry<ApplicationAccessType, String> entry : appAcls.entrySet()) {
-        out.writeUTF(entry.getKey().toString());
-        out.writeUTF(entry.getValue());
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        APPLICATION_ACL_KEY.write(out);
       }
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        for (Entry<ApplicationAccessType, String> entry : appAcls.entrySet()) {
+          out.writeUTF(entry.getKey().toString());
+          out.writeUTF(entry.getValue());
+        }
+      }
     }
 
     public void append(LogKey logKey, LogValue logValue) throws IOException {
@@ -520,21 +535,25 @@ public class AggregatedLogFormat {
       if (pendingUploadFiles.size() == 0) {
         return;
       }
-      DataOutputStream out = this.writer.prepareAppendKey(-1);
-      logKey.write(out);
-      out.close();
-      out = this.writer.prepareAppendValue(-1);
-      logValue.write(out, pendingUploadFiles);
-      out.close();
+      try (DataOutputStream out = this.writer.prepareAppendKey(-1)) {
+        logKey.write(out);
+      }
+      try (DataOutputStream out = this.writer.prepareAppendValue(-1)) {
+        logValue.write(out, pendingUploadFiles);
+      }
     }
 
+    @Override
     public void close() {
       try {
-        this.writer.close();
-      } catch (IOException e) {
+        if (writer != null) {
+          writer.close();
+        }
+      } catch (Exception e) {
         LOG.warn("Exception closing writer", e);
+      } finally {
+        IOUtils.closeStream(this.fsDataOStream);
       }
-      IOUtils.closeStream(fsDataOStream);
     }
   }
 
@@ -959,25 +978,21 @@ public class AggregatedLogFormat {
     }
 
     @Private
-    public static String readContainerMetaDataAndSkipData(
-        DataInputStream valueStream, PrintStream out) throws IOException {
+    public static Pair<String, String> readContainerMetaDataAndSkipData(
+        DataInputStream valueStream) throws IOException {
 
       String fileType = valueStream.readUTF();
       String fileLengthStr = valueStream.readUTF();
       long fileLength = Long.parseLong(fileLengthStr);
-      if (out != null) {
-        out.print("LogType:");
-        out.println(fileType);
-        out.print("LogLength:");
-        out.println(fileLengthStr);
-      }
+      Pair<String, String> logMeta = new Pair<String, String>(
+          fileType, fileLengthStr);
       long totalSkipped = 0;
       long currSkipped = 0;
       while (currSkipped != -1 && totalSkipped < fileLength) {
         currSkipped = valueStream.skip(fileLength - totalSkipped);
         totalSkipped += currSkipped;
       }
-      return fileType;
+      return logMeta;
     }
 
     public void close() {

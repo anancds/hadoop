@@ -23,6 +23,7 @@ import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.metrics2.lib.MutableGaugeFloat;
 import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
@@ -39,6 +40,10 @@ public class CSQueueMetrics extends QueueMetrics {
   MutableGaugeLong usedAMResourceMB;
   @Metric("Used AM CPU limit in virtual cores")
   MutableGaugeLong usedAMResourceVCores;
+  @Metric("Percent of Capacity Used")
+  MutableGaugeFloat usedCapacity;
+  @Metric("Percent of Absolute Capacity Used")
+  MutableGaugeFloat absoluteUsedCapacity;
 
   CSQueueMetrics(MetricsSystem ms, String queueName, Queue parent,
       boolean enableUserMetrics, Configuration conf) {
@@ -91,10 +96,26 @@ public class CSQueueMetrics extends QueueMetrics {
     }
   }
 
+  public float getUsedCapacity() {
+    return usedCapacity.value();
+  }
+
+  public void setUsedCapacity(float usedCapacity) {
+    this.usedCapacity.set(usedCapacity);
+  }
+
+  public float getAbsoluteUsedCapacity() {
+    return absoluteUsedCapacity.value();
+  }
+
+  public void setAbsoluteUsedCapacity(Float absoluteUsedCapacity) {
+    this.absoluteUsedCapacity.set(absoluteUsedCapacity);
+  }
+
   public synchronized static CSQueueMetrics forQueue(String queueName,
       Queue parent, boolean enableUserMetrics, Configuration conf) {
     MetricsSystem ms = DefaultMetricsSystem.instance();
-    QueueMetrics metrics = queueMetrics.get(queueName);
+    QueueMetrics metrics = QueueMetrics.getQueueMetrics().get(queueName);
     if (metrics == null) {
       metrics =
           new CSQueueMetrics(ms, queueName, parent, enableUserMetrics, conf)
@@ -106,7 +127,7 @@ public class CSQueueMetrics extends QueueMetrics {
             ms.register(sourceName(queueName).toString(), "Metrics for queue: "
                 + queueName, metrics);
       }
-      queueMetrics.put(queueName, metrics);
+      QueueMetrics.getQueueMetrics().put(queueName, metrics);
     }
 
     return (CSQueueMetrics) metrics;

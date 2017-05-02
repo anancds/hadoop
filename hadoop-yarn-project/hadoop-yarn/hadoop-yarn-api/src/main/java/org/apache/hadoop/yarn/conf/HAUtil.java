@@ -34,6 +34,7 @@ import java.util.Collection;
 public class HAUtil {
   private static Log LOG = LogFactory.getLog(HAUtil.class);
 
+  @VisibleForTesting
   public static final String BAD_CONFIG_MESSAGE_PREFIX =
     "Invalid configuration! ";
 
@@ -79,6 +80,7 @@ public class HAUtil {
     throws YarnRuntimeException {
     verifyAndSetRMHAIdsList(conf);
     verifyAndSetCurrentRMHAId(conf);
+    verifyLeaderElection(conf);
     verifyAndSetAllServiceAddresses(conf);
   }
 
@@ -117,7 +119,7 @@ public class HAUtil {
       msg.append("Can not find valid RM_HA_ID. None of ");
       for (String id : conf
           .getTrimmedStringCollection(YarnConfiguration.RM_HA_IDS)) {
-        msg.append(addSuffix(YarnConfiguration.RM_ADDRESS, id) + " ");
+        msg.append(addSuffix(YarnConfiguration.RM_ADDRESS, id)).append(" ");
       }
       msg.append(" are matching" +
           " the local address OR " + YarnConfiguration.RM_HA_ID + " is not" +
@@ -132,6 +134,32 @@ public class HAUtil {
     }
     conf.set(YarnConfiguration.RM_HA_ID, rmId);
   }
+
+  /**
+   * This method validates that some leader election service is enabled. YARN
+   * allows leadership election to be disabled in the configuration, which
+   * breaks automatic failover. If leadership election is disabled, this
+   * method will throw an exception via
+   * {@link #throwBadConfigurationException(java.lang.String)}.
+   *
+   * @param conf the {@link Configuration} to validate
+   */
+  private static void verifyLeaderElection(Configuration conf) {
+    if (isAutomaticFailoverEnabled(conf) &&
+        !conf.getBoolean(YarnConfiguration.CURATOR_LEADER_ELECTOR,
+          YarnConfiguration.DEFAULT_CURATOR_LEADER_ELECTOR_ENABLED) &&
+        !isAutomaticFailoverEmbedded(conf)) {
+      throwBadConfigurationException(NO_LEADER_ELECTION_MESSAGE);
+    }
+  }
+
+  @VisibleForTesting
+  static final String NO_LEADER_ELECTION_MESSAGE =
+      "The yarn.resourcemanager.ha.automatic-failover.embedded "
+      + "and yarn.resourcemanager.ha.curator-leader-elector.enabled "
+      + "properties are both false. One of these two properties must "
+      + "be true when yarn.resourcemanager.ha.automatic-failover.enabled "
+      + "is true";
 
   private static void verifyAndSetConfValue(String prefix, Configuration conf) {
     String confKey = null;
@@ -208,7 +236,7 @@ public class HAUtil {
 
   @VisibleForTesting
   static String getNeedToSetValueMessage(String confKey) {
-    return confKey + " needs to be set in a HA configuration.";
+    return confKey + " needs to be set in an HA configuration.";
   }
 
   @VisibleForTesting
@@ -223,7 +251,7 @@ public class HAUtil {
                                                         String rmId) {
     return YarnConfiguration.RM_HA_IDS + "("
       + ids +  ") need to contain " + YarnConfiguration.RM_HA_ID + "("
-      + rmId + ") in a HA configuration.";
+      + rmId + ") in an HA configuration.";
   }
 
   @VisibleForTesting
@@ -263,7 +291,10 @@ public class HAUtil {
     return (value == null) ? defaultValue : value;
   }
 
-  /** Add non empty and non null suffix to a key */
+  /**
+   * Add non empty and non null suffix to a key.
+   * @return the suffixed key
+   */
   public static String addSuffix(String key, String suffix) {
     if (suffix == null || suffix.isEmpty()) {
       return key;

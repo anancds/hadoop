@@ -24,6 +24,7 @@
     * [Atomic Folder Rename](#Atomic_Folder_Rename)
     * [Accessing wasb URLs](#Accessing_wasb_URLs)
     * [Append API Support and Configuration](#Append_API_Support_and_Configuration)
+    * [Multithread Support](#Multithread_Support)
 * [Testing the hadoop-azure Module](#Testing_the_hadoop-azure_Module)
 
 ## <a name="Introduction" />Introduction
@@ -265,6 +266,106 @@ support does not enforce single writer internally but requires applications to g
 It becomes a responsibility of the application either to ensure single-threaded handling for a particular
 file path, or rely on some external locking mechanism of its own.  Failure to do so will result in
 unexpected behavior.
+
+### <a name="Multithread_Support" />Multithread Support
+
+Rename and Delete blob operations on directories with large number of files and sub directories currently is very slow as these operations are done one blob at a time serially. These files and sub folders can be deleted or renamed parallel. Following configurations can be used to enable threads to do parallel processing
+
+To enable 10 threads for Delete operation. Set configuration value to 0 or 1 to disable threads. The default behavior is threads disabled.
+
+    <property>
+      <name>fs.azure.delete.threads</name>
+      <value>10</value>
+    </property>
+
+To enable 20 threads for Rename operation. Set configuration value to 0 or 1 to disable threads. The default behavior is threads disabled.
+
+    <property>
+      <name>fs.azure.rename.threads</name>
+      <value>20</value>
+    </property>
+
+### <a name="WASB_SECURE_MODE" />WASB Secure mode and configuration
+
+WASB can operate in secure mode where the Storage access keys required to communicate with Azure storage does not have to
+be in the same address space as the process using WASB. In this mode all interactions with Azure storage is performed using
+SAS uris. There are two sub modes within the Secure mode, one is remote SAS key mode where the SAS keys are generated from
+a remote process and local mode where SAS keys are generated within WASB. By default the SAS Key mode is expected to run in
+Romote mode, however for testing purposes the local mode can be enabled to generate SAS keys in the same process as WASB.
+
+To enable Secure mode following property needs to be set to true.
+
+```
+    <property>
+      <name>fs.azure.secure.mode</name>
+      <value>true</value>
+    </property>
+```
+
+To enable SAS key generation locally following property needs to be set to true.
+
+```
+    <property>
+      <name>fs.azure.local.sas.key.mode</name>
+      <value>true</value>
+    </property>
+```
+To use the remote SAS key generation mode, an external REST service is expected to provided required SAS keys.
+Following property can used to provide the end point to use for remote SAS Key generation:
+
+```
+    <property>
+      <name>fs.azure.cred.service.url</name>
+      <value>{URL}</value>
+    </property>
+```
+The remote service is expected to provide support for two REST calls ```{URL}/GET_CONTAINER_SAS``` and ```{URL}/GET_RELATIVE_BLOB_SAS```, for generating
+container and relative blob sas keys. An example requests
+
+```{URL}/GET_CONTAINER_SAS?storage_account=<account_name>&container=<container>&sas_expiry=<expiry period>&delegation_token=<delegation token>```
+```{URL}/GET_CONTAINER_SAS?storage_account=<account_name>&container=<container>&relative_path=<relative path>&sas_expiry=<expiry period>&delegation_token=<delegation token>```
+
+The service is expected to return a response in JSON format:
+```
+{
+  "responseCode" : 0 or non-zero <int>,
+  "responseMessage" : relavant message on failure <String>,
+  "sasKey" : Requested SAS Key <String>
+}
+```
+
+## <a name="WASB Authorization" />Authorization Support in WASB.
+
+Authorization support can be enabled in WASB using the following configuration:
+
+```
+    <property>
+      <name>fs.azure.authorization</name>
+      <value>true</value>
+    </property>
+```
+  The current implementation of authorization relies on the presence of an external service that can enforce
+  the authorization. The service is expected to be running on a URL provided by the following config.
+
+```
+    <property>
+      <name>fs.azure.authorization.remote.service.url</name>
+      <value>{URL}</value>
+    </property>
+```
+
+  The remote service is expected to provide support for the following REST call: ```{URL}/CHECK_AUTHORIZATION```
+  An example request:
+  ```{URL}/CHECK_AUTHORIZATION?wasb_absolute_path=<absolute_path>&operation_type=<operation type>&delegation_token=<delegation token>```
+
+  The service is expected to return a response in JSON format:
+  ```
+  {
+    "responseCode" : 0 or non-zero <int>,
+    "responseMessage" : relevant message on failure <String>,
+    "authorizationResult" : true/false <boolean>
+  }
+  ```
 
 ## <a name="Testing_the_hadoop-azure_Module" />Testing the hadoop-azure Module
 
